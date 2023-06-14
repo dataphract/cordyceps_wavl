@@ -101,6 +101,23 @@ where
         WavlTree { root: None, len: 0 }
     }
 
+    /// Returns `true` if the map contains no elements.
+    pub const fn is_empty(&self) -> bool {
+        let empty = self.len() == 0;
+
+        if cfg!(debug_assertions) {
+            // Can't use assert_eq!() in const fn.
+            assert!(empty == self.root.is_none());
+        }
+
+        empty
+    }
+
+    /// Returns the number of elements in the tree.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
     #[doc(hidden)]
     pub fn assert_invariants(&self) {
         if let Some(root) = self.root {
@@ -140,16 +157,16 @@ where
     }
 
     /// Returns a reference to the node corresponding to `key`.
-    pub fn find<Q>(&self, key: &Q) -> Option<Pin<&T>>
+    pub fn get<Q>(&self, key: &Q) -> Option<Pin<&T>>
     where
         T::Key: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let ptr = self.find_raw(key)?;
+        let ptr = self.get_raw(key)?;
         unsafe { Some(Pin::new_unchecked(ptr.as_ref())) }
     }
 
-    fn find_raw<Q>(&self, key: &Q) -> Link<T>
+    fn get_raw<Q>(&self, key: &Q) -> Link<T>
     where
         T::Key: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
@@ -166,6 +183,32 @@ where
                     Ordering::Greater => opt_cur = T::links(cur).as_ref().right(),
                 }
             }
+        }
+    }
+
+    /// Returns the minimum element of the tree.
+    pub fn first(&self) -> Option<Pin<&T>> {
+        let mut opt_cur = self.root;
+
+        unsafe {
+            while let Some(cur) = opt_cur {
+                opt_cur = T::links(cur).as_ref().left();
+            }
+
+            opt_cur.map(|first| Pin::new_unchecked(first.as_ref()))
+        }
+    }
+
+    /// Returns the maximum element of the tree.
+    pub fn last(&self) -> Option<Pin<&T>> {
+        let mut opt_cur = self.root;
+
+        unsafe {
+            while let Some(cur) = opt_cur {
+                opt_cur = T::links(cur).as_ref().right();
+            }
+
+            opt_cur.map(|first| Pin::new_unchecked(first.as_ref()))
         }
     }
 
@@ -691,6 +734,36 @@ where
         }
     }
 
+    /// Clears the tree, removing all elements.
+    pub fn clear(&mut self) {
+        let mut opt_cur = self.root;
+
+        while let Some(cur) = opt_cur {
+            unsafe {
+                // Descend to the minimum node.
+                let (cur, parent) = self.min_in_subtree(cur);
+                let parent = parent.or_else(|| T::links(cur).as_ref().parent());
+
+                let right = T::links(cur).as_ref().right();
+
+                // Elevate the node's right child (which may be None).
+                self.replace_child_or_set_root(parent, cur, right);
+                self.maybe_set_parent(right, parent);
+
+                // Drop the node.
+                drop(T::from_ptr(cur));
+                self.len -= 1;
+
+                // If the node had no right child, climb to the parent. If the node had no parent,
+                // the tree is empty.
+                opt_cur = right.or(parent);
+            }
+        }
+
+        debug_assert!(self.root.is_none());
+        debug_assert_eq!(self.len(), 0);
+    }
+
     // Support methods ========================================================
 
     #[inline]
@@ -766,49 +839,7 @@ where
     T: TreeNode<Links<T>> + ?Sized,
 {
     fn drop(&mut self) {
-        let mut opt_cur = self.root;
-
-        while let Some(cur) = opt_cur {
-            unsafe {
-                println!("=== ITER ===");
-                println!("cur = {:?}", cur.as_ref().key());
-
-                // Descend to the minimum node.
-                let (cur, parent) = self.min_in_subtree(cur);
-                let parent = parent.or_else(|| T::links(cur).as_ref().parent());
-
-                println!("min = {:?}", cur.as_ref().key());
-                if let Some(parent) = parent {
-                    println!("min_parent = {:?}", parent.as_ref().key());
-                }
-
-                let right = T::links(cur).as_ref().right();
-                if let Some(right) = right {
-                    println!("min_right = {:?}", right.as_ref().key());
-                }
-
-                // Elevate the node's right child (which may be None).
-                self.replace_child_or_set_root(parent, cur, right);
-                self.maybe_set_parent(right, parent);
-
-                println!("  = AFTER RELINK");
-
-                if let Some(parent_left) = parent.and_then(|p| T::links(p).as_ref().left()) {
-                    println!("min_parent.left = {:?}", parent_left.as_ref().key());
-                };
-
-                if let Some(right_parent) = right.and_then(|r| T::links(r).as_ref().parent()) {
-                    println!("min_right.parent = {:?}", right_parent.as_ref().key());
-                }
-
-                // Drop the node.
-                drop(T::from_ptr(cur));
-
-                // If the node had no right child, climb to the parent. If the node had no parent,
-                // the tree is empty.
-                opt_cur = right.or(parent);
-            }
-        }
+        self.clear();
     }
 }
 
@@ -936,7 +967,7 @@ mod tests {
         }
 
         for key in keys {
-            let node = tree.find_raw(key).expect("item not found");
+            let node = tree.get_raw(key).expect("item not found");
             assert_eq!(unsafe { node.as_ref().key() }, key);
         }
     }
@@ -1010,7 +1041,7 @@ mod tests {
         }
 
         for key in keys {
-            let node = tree.find_raw(key).expect("item not found");
+            let node = tree.get_raw(key).expect("item not found");
             unsafe { tree.remove(node) };
         }
     }
