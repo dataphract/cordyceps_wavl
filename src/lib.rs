@@ -1039,6 +1039,20 @@ mod tests {
             unsafe { tree.remove(node) };
             tree.assert_invariants();
         }
+
+        for &key in keys {
+            tree.insert(Box::new(TestNode {
+                links: Links::new(),
+                key,
+            }));
+            tree.assert_invariants();
+        }
+
+        for key in keys.iter().rev() {
+            let node = tree.get_raw(key).expect("item not found");
+            unsafe { tree.remove(node) };
+            tree.assert_invariants();
+        }
     }
 
     #[test]
