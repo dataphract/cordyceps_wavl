@@ -36,7 +36,7 @@
 
 use core::{
     cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomData, marker::PhantomPinned, mem,
-    ptr::NonNull,
+    pin::Pin, ptr::NonNull,
 };
 
 use cordyceps::Linked;
@@ -63,6 +63,12 @@ pub struct Links<T: ?Sized, K: Ord> {
 const LEFT: usize = 0;
 const RIGHT: usize = 1;
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Dir {
+    Left = 0,
+    Right = 1,
+}
+
 #[repr(C)]
 struct LinksInner<T: ?Sized, K: Ord> {
     parent: Link<T>,
@@ -79,6 +85,7 @@ where
     T: Linked<Links<T, K>> + ?Sized,
     K: Ord + fmt::Debug,
 {
+    /// Returns a new empty tree.
     pub const fn new() -> WavlTree<T, K> {
         WavlTree {
             root: None,
@@ -87,12 +94,13 @@ where
         }
     }
 
-    fn assert_invariants(&self) {
+    pub fn assert_invariants(&self) {
         if let Some(root) = self.root {
             unsafe { self.assert_invariants_at(root) };
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     unsafe fn assert_invariants_at(&self, node: NonNull<T>) {
         unsafe {
             let rank = T::links(node).as_ref().rank();
@@ -123,7 +131,12 @@ where
         }
     }
 
-    fn find(&self, item: &K) -> Link<T> {
+    pub fn find(&self, item: &K) -> Option<Pin<&T>> {
+        let ptr = self.find_raw(item)?;
+        unsafe { Some(Pin::new_unchecked(ptr.as_ref())) }
+    }
+
+    fn find_raw(&self, item: &K) -> Link<T> {
         let mut opt_cur = self.root;
 
         loop {
@@ -148,14 +161,15 @@ where
     }
 
     #[inline]
-    unsafe fn maybe_replace_child(
+    unsafe fn replace_child_or_set_root(
         &mut self,
         parent: Link<T>,
         old_child: NonNull<T>,
         new_child: Link<T>,
     ) {
-        if let Some(parent) = parent {
-            self.replace_child(parent, old_child, new_child);
+        match parent {
+            Some(parent) => self.replace_child(parent, old_child, new_child),
+            None => self.root = new_child,
         }
     }
 
@@ -391,6 +405,9 @@ where
         }
     }
 
+    /// Inserts an item into the tree.
+    ///
+    /// This operation completes in _O(log(n))_ time.
     pub fn insert(&mut self, item: T::Handle) {
         let ptr = T::into_ptr(item);
 
@@ -467,6 +484,24 @@ where
         }
     }
 
+    unsafe fn rank(&self, node: Option<NonNull<T>>) -> i8 {
+        node.map(|n| T::links(n).as_ref().rank()).unwrap_or(-1)
+    }
+
+    unsafe fn is_2_2(&self, node: NonNull<T>) -> bool {
+        unsafe {
+            let left_rank = self.rank(T::links(node).as_ref().left());
+
+            if left_rank != T::links(node).as_ref().rank() - 2 {
+                return false;
+            }
+
+            let right_rank = self.rank(T::links(node).as_ref().right());
+
+            left_rank == right_rank
+        }
+    }
+
     unsafe fn is_2_child(&self, parent: NonNull<T>, child: NonNull<T>) -> bool {
         unsafe { T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 2 }
     }
@@ -475,24 +510,59 @@ where
         unsafe { T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 3 }
     }
 
-    unsafe fn rebalance_3_child(&mut self, child: NonNull<T>) {
-        todo!()
+    unsafe fn which_child(&self, parent: NonNull<T>, child: NonNull<T>) -> Dir {
+        if T::links(parent).as_ref().left() == Some(child) {
+            Dir::Left
+        } else {
+            Dir::Right
+        }
     }
 
-    // Restores the rank rule to a tree with a single 2,2 leaf.
-    unsafe fn rebalance_2_2_leaf(&mut self, leaf: NonNull<T>) {
-        todo!()
-        // unsafe {
-        //     let parent = T::links(leaf)
-        //         .as_ref()
-        //         .parent()
-        //         .expect("2,2 leaf cannot be tree root");
+    unsafe fn rebalance_3_child(&mut self, mut parent: NonNull<T>, child: NonNull<T>) {
+        let mut x = child;
+        let mut y = self.sibling(x).unwrap();
 
-        //     T::links(leaf).as_mut().demote();
-        //     if T::links(parent).as_ref().rank_parity() != T::links(leaf).as_ref().rank_parity() {
-        //         self.rebalance_3_child(parent, leaf);
-        //     }
-        // }
+        loop {
+            if self.is_2_child(parent, y) {
+                T::links(parent).as_mut().demote();
+            } else if self.is_2_2(y) {
+                T::links(y).as_mut().demote();
+                T::links(parent).as_mut().demote();
+            } else {
+                break;
+            }
+
+            x = parent;
+            parent = T::links(x).as_ref().parent().expect("should have a parent");
+            y = self.sibling(x).expect("should have a sibling");
+        }
+
+        if !self.is_3_child(parent, x) {
+            return;
+        }
+
+        let dir = self.which_child(parent, x);
+
+        // Here we give up on descriptive names entirely and just use the names from the paper.
+        let z = parent;
+        let v = T::links(y).as_ref().child(dir as usize).unwrap();
+        let w = T::links(y).as_ref().child(dir as usize ^ 1).unwrap();
+
+        if self.is_2_child(y, w) {
+            self.rotate_twice_at(z, y, v);
+            T::links(v).as_mut().promote_twice();
+            T::links(y).as_mut().demote();
+            T::links(z).as_mut().demote_twice();
+        } else {
+            self.rotate_at(parent, y);
+            T::links(y).as_mut().promote();
+
+            if T::links(z).as_ref().is_leaf() {
+                T::links(z).as_mut().demote_twice();
+            } else {
+                T::links(z).as_mut().demote();
+            }
+        }
     }
 
     // Returns the minimum node in the subtree.
@@ -511,10 +581,12 @@ where
         (cur, parent)
     }
 
-    unsafe fn remove_unary_or_leaf(&mut self, node: NonNull<T>) -> T::Handle {
-        todo!()
-    }
-
+    /// Removes an arbitrary node from the tree.
+    ///
+    /// # Safety
+    ///
+    /// It is the caller's responsibility to ensure that `node` is an element of `self`, and not any
+    /// other tree.
     pub unsafe fn remove(&mut self, node: NonNull<T>) -> T::Handle {
         // There are three possible cases:
         //
@@ -559,8 +631,8 @@ where
 
             enum Violation<T: ?Sized> {
                 None,
-                ThreeChild(NonNull<T>),
-                TwoTwoLeaf(NonNull<T>),
+                ThreeChild(NonNull<T>, NonNull<T>),
+                TwoTwoLeaf(Option<NonNull<T>>, NonNull<T>),
             }
 
             let violation = match (left, right) {
@@ -580,35 +652,35 @@ where
                     }
 
                     // Link `succ` to `parent`.
-                    self.maybe_replace_child(parent, node, Some(succ));
-                    T::links(succ).as_mut().set_parent(parent);
+                    self.replace_child_or_set_root(parent, node, Some(succ));
 
                     // Transfer rank of `node` to `succ`.
                     let node_rank = T::links(node).as_ref().rank();
+
+                    T::links(succ).as_mut().set_parent(parent);
                     T::links(succ).as_mut().set_rank(node_rank);
+                    T::links(succ).as_mut().set_left(Some(left));
+                    // Right link is updated above iff succ != right.
 
                     // Link `succ` to `left`.
-                    T::links(succ).as_mut().set_left(Some(left));
                     T::links(left).as_mut().set_parent(Some(succ));
-
-                    // Right link is updated above iff succ != right.
 
                     // If the successor has a right child and was a 2-child, its child becomes a
                     // 3-child; otherwise, if the successor is not `right`, and its parent is unary,
                     // its parent becomes a 2-2 leaf; otherwise the rank rule holds.
                     succ_right
                         .filter(|_| succ_was_2_child)
-                        .map(Violation::ThreeChild)
+                        .map(|sr| Violation::ThreeChild(succ, sr))
                         .or_else(|| {
                             succ_parent
                                 .filter(|&p| T::links(p).as_ref().is_leaf())
-                                .map(Violation::TwoTwoLeaf)
+                                .map(|sp| Violation::TwoTwoLeaf(T::links(sp).as_ref().parent(), sp))
                         })
                         .unwrap_or(Violation::None)
                 }
 
                 (Some(child), None) | (None, Some(child)) => {
-                    self.maybe_replace_child(parent, node, Some(child));
+                    self.replace_child_or_set_root(parent, node, Some(child));
                     T::links(child).as_mut().set_parent(parent);
 
                     // The removed node was unary. Thus the removed node was 1,2, and its child was
@@ -619,41 +691,41 @@ where
                         .filter(|&p| {
                             T::links(p).as_ref().rank() - T::links(node).as_ref().rank() == 2
                         })
-                        .map(|_| Violation::ThreeChild(node))
+                        .map(|parent| Violation::ThreeChild(parent, node))
                         .unwrap_or(Violation::None)
                 }
 
                 (None, None) => {
-                    self.maybe_replace_child(parent, node, None);
+                    self.replace_child_or_set_root(parent, node, None);
 
                     // The removed node was a leaf and thus 1,1. If its parent is unary, the parent
                     // becomes a 2,2 leaf; otherwise the rank rule holds.
                     parent
                         .filter(|&p| T::links(p).as_ref().is_unary())
-                        .map(Violation::TwoTwoLeaf)
+                        .map(|p| Violation::TwoTwoLeaf(T::links(p).as_ref().parent(), p))
                         .unwrap_or(Violation::None)
                 }
             };
 
             match violation {
-                Violation::None => todo!(),
-                Violation::ThreeChild(leaf) => {
-                    self.rebalance_3_child(leaf);
-                    todo!();
+                Violation::None => (),
+                Violation::ThreeChild(parent, leaf) => {
+                    self.rebalance_3_child(parent, leaf);
                 }
-                Violation::TwoTwoLeaf(leaf) => {
+                Violation::TwoTwoLeaf(parent, leaf) => {
                     T::links(leaf).as_mut().demote();
 
-                    if self.is_3_child(todo!(), leaf) {
-                        self.rebalance_3_child(leaf);
+                    if let Some(parent) = parent {
+                        if self.is_3_child(parent, leaf) {
+                            self.rebalance_3_child(parent, leaf);
+                        }
                     }
-
-                    todo!();
                 }
             }
 
-            todo!("if 2,2 leaf, demote it");
-            todo!("if 3-child...");
+            self.len -= 1;
+
+            T::from_ptr(caller_removed)
         }
     }
 }
@@ -686,7 +758,7 @@ where
                 }
 
                 // Elevate the node's right child (which may be None).
-                self.maybe_replace_child(parent, cur, right);
+                self.replace_child_or_set_root(parent, cur, right);
                 self.maybe_set_parent(right, parent);
 
                 println!("  = AFTER RELINK");
@@ -771,14 +843,6 @@ impl<T: ?Sized, K: Ord> Links<T, K> {
     #[inline]
     fn key(&self) -> &K {
         unsafe { &(*self.inner.get()).key }
-    }
-
-    #[inline]
-    fn clear(&mut self) {
-        self.set_parent(None);
-        self.set_left(None);
-        self.set_right(None);
-        self.inner.get_mut().rank = 0;
     }
 
     #[inline]
@@ -873,7 +937,7 @@ mod tests {
         }
 
         for key in keys {
-            let node = tree.find(key).expect("item not found");
+            let node = tree.find_raw(key).expect("item not found");
             assert_eq!(unsafe { TestNode::links(node).as_ref().key() }, key);
         }
     }
@@ -933,5 +997,26 @@ mod tests {
         insert_find_all(&[3, 1, 2, 0]);
         insert_find_all(&[3, 2, 0, 1]);
         insert_find_all(&[3, 2, 1, 0]);
+    }
+
+    fn insert_remove_all(keys: &[u32]) {
+        let mut tree: WavlTree<TestNode, u32> = WavlTree::new();
+
+        for &key in keys {
+            tree.insert(Box::new(TestNode {
+                links: Links::new(key),
+            }));
+            tree.assert_invariants();
+        }
+
+        for key in keys {
+            let node = tree.find_raw(key).expect("item not found");
+            unsafe { tree.remove(node) };
+        }
+    }
+
+    #[test]
+    fn remove_one() {
+        insert_remove_all(&[0]);
     }
 }
