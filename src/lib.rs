@@ -35,29 +35,34 @@
 //
 
 use core::{
-    cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomData, marker::PhantomPinned, mem,
-    ops::Not, pin::Pin, ptr::NonNull,
+    cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not, pin::Pin,
+    ptr::NonNull,
 };
+use std::borrow::Borrow;
 
 use cordyceps::Linked;
+
+pub trait TreeNode<L>: Linked<L> {
+    type Key: Ord + fmt::Debug;
+
+    fn key(&self) -> &Self::Key;
+}
 
 /// An intrusive weak AVL tree, or WAVL tree.
 ///
 /// Implementation based on the paper [Rank-Balanced Trees] by Hauepler, Sen and Tarjan.
 ///
 /// [Rank-Balanced Trees]: http://arks.princeton.edu/ark:/88435/pr1nz5z
-pub struct WavlTree<T, K>
+pub struct WavlTree<T>
 where
-    T: Linked<Links<T, K>> + ?Sized,
-    K: Ord + fmt::Debug,
+    T: TreeNode<Links<T>> + ?Sized,
 {
     root: Link<T>,
-    phantom: PhantomData<K>,
     len: usize,
 }
 
-pub struct Links<T: ?Sized, K: Ord> {
-    inner: UnsafeCell<LinksInner<T, K>>,
+pub struct Links<T: ?Sized> {
+    inner: UnsafeCell<LinksInner<T>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -78,28 +83,22 @@ impl Not for Dir {
 }
 
 #[repr(C)]
-struct LinksInner<T: ?Sized, K: Ord> {
+struct LinksInner<T: ?Sized> {
     parent: Link<T>,
     children: [Link<T>; 2],
-    key: K,
     rank: i8,
     _unpin: PhantomPinned,
 }
 
 type Link<T> = Option<NonNull<T>>;
 
-impl<T, K> WavlTree<T, K>
+impl<T> WavlTree<T>
 where
-    T: Linked<Links<T, K>> + ?Sized,
-    K: Ord + fmt::Debug,
+    T: TreeNode<Links<T>> + ?Sized,
 {
     /// Returns a new empty tree.
-    pub const fn new() -> WavlTree<T, K> {
-        WavlTree {
-            root: None,
-            phantom: PhantomData,
-            len: 0,
-        }
+    pub const fn new() -> WavlTree<T> {
+        WavlTree { root: None, len: 0 }
     }
 
     pub fn assert_invariants(&self) {
@@ -139,19 +138,27 @@ where
         }
     }
 
-    pub fn find(&self, item: &K) -> Option<Pin<&T>> {
-        let ptr = self.find_raw(item)?;
+    pub fn find<Q>(&self, key: &Q) -> Option<Pin<&T>>
+    where
+        T::Key: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        let ptr = self.find_raw(key)?;
         unsafe { Some(Pin::new_unchecked(ptr.as_ref())) }
     }
 
-    fn find_raw(&self, item: &K) -> Link<T> {
+    fn find_raw<Q>(&self, key: &Q) -> Link<T>
+    where
+        T::Key: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
         let mut opt_cur = self.root;
 
         loop {
             let cur = opt_cur?;
 
             unsafe {
-                match item.cmp(T::links(cur).as_ref().key()) {
+                match key.cmp(cur.as_ref().key().borrow()) {
                     Ordering::Less => opt_cur = T::links(cur).as_ref().left(),
                     Ordering::Equal => return Some(cur),
                     Ordering::Greater => opt_cur = T::links(cur).as_ref().right(),
@@ -441,12 +448,7 @@ where
 
         // Descend the tree, looking for a suitable leaf.
         while let Some(parent) = opt_parent {
-            let ordering = unsafe {
-                T::links(ptr)
-                    .as_ref()
-                    .key()
-                    .cmp(T::links(parent).as_ref().key())
-            };
+            let ordering = unsafe { ptr.as_ref().key().cmp(parent.as_ref().key()) };
 
             match ordering {
                 Ordering::Less => unsafe {
@@ -738,10 +740,9 @@ where
     }
 }
 
-impl<T, K> Drop for WavlTree<T, K>
+impl<T> Drop for WavlTree<T>
 where
-    T: Linked<Links<T, K>> + ?Sized,
-    K: Ord + fmt::Debug,
+    T: TreeNode<Links<T>> + ?Sized,
 {
     fn drop(&mut self) {
         let mut opt_cur = self.root;
@@ -749,20 +750,20 @@ where
         while let Some(cur) = opt_cur {
             unsafe {
                 println!("=== ITER ===");
-                println!("cur = {:?}", T::links(cur).as_ref().key());
+                println!("cur = {:?}", cur.as_ref().key());
 
                 // Descend to the minimum node.
                 let (cur, parent) = self.min_in_subtree(cur);
                 let parent = parent.or_else(|| T::links(cur).as_ref().parent());
 
-                println!("min = {:?}", T::links(cur).as_ref().key());
+                println!("min = {:?}", cur.as_ref().key());
                 if let Some(parent) = parent {
-                    println!("min_parent = {:?}", T::links(parent).as_ref().key());
+                    println!("min_parent = {:?}", parent.as_ref().key());
                 }
 
                 let right = T::links(cur).as_ref().right();
                 if let Some(right) = right {
-                    println!("min_right = {:?}", T::links(right).as_ref().key());
+                    println!("min_right = {:?}", right.as_ref().key());
                 }
 
                 // Elevate the node's right child (which may be None).
@@ -772,17 +773,11 @@ where
                 println!("  = AFTER RELINK");
 
                 if let Some(parent_left) = parent.and_then(|p| T::links(p).as_ref().left()) {
-                    println!(
-                        "min_parent.left = {:?}",
-                        T::links(parent_left).as_ref().key()
-                    );
+                    println!("min_parent.left = {:?}", parent_left.as_ref().key());
                 };
 
                 if let Some(right_parent) = right.and_then(|r| T::links(r).as_ref().parent()) {
-                    println!(
-                        "min_right.parent = {:?}",
-                        T::links(right_parent).as_ref().key()
-                    );
+                    println!("min_right.parent = {:?}", right_parent.as_ref().key());
                 }
 
                 // Drop the node.
@@ -796,14 +791,13 @@ where
     }
 }
 
-impl<T: ?Sized, K: Ord> Links<T, K> {
+impl<T: ?Sized> Links<T> {
     #[must_use]
-    pub const fn new(key: K) -> Self {
+    pub const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(LinksInner {
                 parent: None,
                 children: [None; 2],
-                key,
                 rank: 0,
                 _unpin: PhantomPinned,
             }),
@@ -843,11 +837,6 @@ impl<T: ?Sized, K: Ord> Links<T, K> {
     #[inline]
     fn right(&self) -> Link<T> {
         self.child(Dir::Right)
-    }
-
-    #[inline]
-    fn key(&self) -> &K {
-        unsafe { &(*self.inner.get()).key }
     }
 
     #[inline]
@@ -911,10 +900,11 @@ mod tests {
 
     #[repr(C)]
     struct TestNode {
-        links: Links<TestNode, u32>,
+        links: Links<TestNode>,
+        key: u32,
     }
 
-    unsafe impl Linked<Links<TestNode, u32>> for TestNode {
+    unsafe impl Linked<Links<TestNode>> for TestNode {
         type Handle = Box<TestNode>;
 
         fn into_ptr(r: Self::Handle) -> NonNull<Self> {
@@ -925,25 +915,34 @@ mod tests {
             unsafe { Box::from_raw(ptr.as_ptr()) }
         }
 
-        unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<TestNode, u32>> {
+        unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<TestNode>> {
             // SAFETY: Self is #[repr(C)] and `links` is first field
             ptr.cast()
         }
     }
 
+    impl TreeNode<Links<TestNode>> for TestNode {
+        type Key = u32;
+
+        fn key(&self) -> &Self::Key {
+            &self.key
+        }
+    }
+
     fn insert_find_all(keys: &[u32]) {
-        let mut tree: WavlTree<TestNode, u32> = WavlTree::new();
+        let mut tree: WavlTree<TestNode> = WavlTree::new();
 
         for &key in keys {
             tree.insert(Box::new(TestNode {
-                links: Links::new(key),
+                links: Links::new(),
+                key,
             }));
             tree.assert_invariants();
         }
 
         for key in keys {
             let node = tree.find_raw(key).expect("item not found");
-            assert_eq!(unsafe { TestNode::links(node).as_ref().key() }, key);
+            assert_eq!(unsafe { node.as_ref().key() }, key);
         }
     }
 
@@ -1005,11 +1004,12 @@ mod tests {
     }
 
     fn insert_remove_all(keys: &[u32]) {
-        let mut tree: WavlTree<TestNode, u32> = WavlTree::new();
+        let mut tree: WavlTree<TestNode> = WavlTree::new();
 
         for &key in keys {
             tree.insert(Box::new(TestNode {
-                links: Links::new(key),
+                links: Links::new(),
+                key,
             }));
             tree.assert_invariants();
         }

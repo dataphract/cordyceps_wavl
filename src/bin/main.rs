@@ -1,14 +1,15 @@
 use std::ptr::NonNull;
 
 use cordyceps::Linked;
-use cordyceps_wavl::{Links, WavlTree};
+use cordyceps_wavl::{Links, TreeNode, WavlTree};
 
 #[repr(C)]
 struct TestNode {
-    links: Links<TestNode, u32>,
+    links: Links<TestNode>,
+    key: u32,
 }
 
-unsafe impl Linked<Links<TestNode, u32>> for TestNode {
+unsafe impl Linked<Links<TestNode>> for TestNode {
     type Handle = Box<TestNode>;
 
     fn into_ptr(r: Self::Handle) -> NonNull<Self> {
@@ -19,29 +20,41 @@ unsafe impl Linked<Links<TestNode, u32>> for TestNode {
         unsafe { Box::from_raw(ptr.as_ptr()) }
     }
 
-    unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<TestNode, u32>> {
+    unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<TestNode>> {
         // SAFETY: Self is #[repr(C)] and `links` is first field
         ptr.cast()
     }
 }
 
+impl TreeNode<Links<TestNode>> for TestNode {
+    type Key = u32;
+
+    fn key(&self) -> &Self::Key {
+        &self.key
+    }
+}
+
 fn main() {
-    let mut tree: WavlTree<TestNode, u32> = WavlTree::new();
+    let mut tree: WavlTree<TestNode> = WavlTree::new();
 
     tree.insert(Box::new(TestNode {
-        links: Links::new(0_u32),
+        links: Links::new(),
+        key: 0,
     }));
 
     tree.insert(Box::new(TestNode {
-        links: Links::new(2_u32),
+        links: Links::new(),
+        key: 2,
     }));
 
     tree.insert(Box::new(TestNode {
-        links: Links::new(3_u32),
+        links: Links::new(),
+        key: 3,
     }));
 
     tree.insert(Box::new(TestNode {
-        links: Links::new(1_u32),
+        links: Links::new(),
+        key: 1,
     }));
 
     drop(tree);
