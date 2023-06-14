@@ -319,7 +319,6 @@ where
                 Dir::Right
             };
 
-            println!("rotate {dir:?}");
             assert!(self.root.map(|r| r != up).unwrap_or(false));
 
             let across = T::links(up).as_ref().child(dir);
@@ -656,10 +655,10 @@ where
                 (None, None) => {
                     self.replace_child_or_set_root(parent, node, None);
 
-                    // The removed node was a leaf and thus 1,1. If its parent is unary, the parent
+                    // The removed node was a leaf and thus 1,1. If its parent was unary, the parent
                     // becomes a 2,2 leaf; otherwise the rank rule holds.
                     parent
-                        .filter(|&p| T::links(p).as_ref().is_unary())
+                        .filter(|&p| T::links(p).as_ref().is_leaf())
                         .map(|p| Violation::TwoTwoLeaf(T::links(p).as_ref().parent(), p))
                         .unwrap_or(Violation::None)
                 }
@@ -857,11 +856,6 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    fn is_unary(&self) -> bool {
-        self.left().is_some() != self.right().is_some()
-    }
-
-    #[inline]
     fn is_leaf(&self) -> bool {
         self.left().is_none() && self.right().is_none()
     }
@@ -1043,11 +1037,28 @@ mod tests {
         for key in keys {
             let node = tree.get_raw(key).expect("item not found");
             unsafe { tree.remove(node) };
+            tree.assert_invariants();
         }
     }
 
     #[test]
     fn remove_one() {
         insert_remove_all(&[0]);
+    }
+
+    #[test]
+    fn remove_two() {
+        insert_remove_all(&[0, 1]);
+        insert_remove_all(&[1, 0]);
+    }
+
+    #[test]
+    fn remove_three() {
+        insert_remove_all(&[0, 1, 2]);
+        insert_remove_all(&[0, 2, 1]);
+        insert_remove_all(&[1, 0, 2]);
+        insert_remove_all(&[1, 2, 0]);
+        insert_remove_all(&[2, 0, 1]);
+        insert_remove_all(&[2, 1, 0]);
     }
 }

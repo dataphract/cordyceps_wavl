@@ -44,18 +44,25 @@ fn main() {
 
     tree.insert(Box::new(TestNode {
         links: Links::new(),
+        key: 1,
+    }));
+
+    tree.insert(Box::new(TestNode {
+        links: Links::new(),
         key: 2,
     }));
 
-    tree.insert(Box::new(TestNode {
-        links: Links::new(),
-        key: 3,
-    }));
+    let node = tree.get(&0).expect("item not found");
+    unsafe { tree.remove(node.get_ref().into()) };
+    tree.assert_invariants();
 
-    tree.insert(Box::new(TestNode {
-        links: Links::new(),
-        key: 1,
-    }));
+    let node = tree.get(&1).expect("item not found");
+    unsafe { tree.remove(node.get_ref().into()) };
+    tree.assert_invariants();
+
+    let node = tree.get(&2).expect("item not found");
+    unsafe { tree.remove(node.get_ref().into()) };
+    tree.assert_invariants();
 
     drop(tree);
 }
