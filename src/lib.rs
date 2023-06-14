@@ -36,7 +36,7 @@
 
 use core::{
     cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomData, marker::PhantomPinned, mem,
-    pin::Pin, ptr::NonNull,
+    ops::Not, pin::Pin, ptr::NonNull,
 };
 
 use cordyceps::Linked;
@@ -60,13 +60,21 @@ pub struct Links<T: ?Sized, K: Ord> {
     inner: UnsafeCell<LinksInner<T, K>>,
 }
 
-const LEFT: usize = 0;
-const RIGHT: usize = 1;
-
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Dir {
     Left = 0,
     Right = 1,
+}
+
+impl Not for Dir {
+    type Output = Dir;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Dir::Left => Dir::Right,
+            Dir::Right => Dir::Left,
+        }
+    }
 }
 
 #[repr(C)]
@@ -110,7 +118,7 @@ where
                 assert_eq!(rank, 0);
             }
 
-            for child in [0, 1] {
+            for child in [Dir::Left, Dir::Right] {
                 if let Some(child) = T::links(node).as_ref().child(child) {
                     let child_rank = T::links(child).as_ref().rank();
 
@@ -191,10 +199,10 @@ where
         new_child: Option<NonNull<T>>,
     ) {
         unsafe {
-            if T::links(parent).as_ref().child(0) == Some(old_child) {
-                T::links(parent).as_mut().set_child(0, new_child);
+            if T::links(parent).as_ref().child(Dir::Left) == Some(old_child) {
+                T::links(parent).as_mut().set_child(Dir::Left, new_child);
             } else {
-                T::links(parent).as_mut().set_child(1, new_child);
+                T::links(parent).as_mut().set_child(Dir::Right, new_child);
             }
         }
     }
@@ -216,26 +224,26 @@ where
         new_child: Option<NonNull<T>>,
     ) {
         unsafe {
-            if T::links(parent).as_ref().child(0) == Some(old_child) {
+            if T::links(parent).as_ref().child(Dir::Left) == Some(old_child) {
                 if let Some(new_child) = new_child {
                     assert_ne!(
-                        T::links(parent).as_ref().child(1),
+                        T::links(parent).as_ref().child(Dir::Right),
                         Some(new_child),
                         "`new_child` must not be a child of `parent`"
                     );
                 }
 
-                T::links(parent).as_mut().set_child(0, new_child);
-            } else if T::links(parent).as_ref().child(1) == Some(old_child) {
+                T::links(parent).as_mut().set_child(Dir::Left, new_child);
+            } else if T::links(parent).as_ref().child(Dir::Right) == Some(old_child) {
                 if let Some(new_child) = new_child {
                     assert_ne!(
-                        T::links(parent).as_ref().child(0),
+                        T::links(parent).as_ref().child(Dir::Left),
                         Some(new_child),
                         "`new_child` must not be a child of `parent`"
                     );
                 }
 
-                T::links(parent).as_mut().set_child(1, new_child);
+                T::links(parent).as_mut().set_child(Dir::Right, new_child);
             } else {
                 unreachable!("`old_child` must be a child of `parent`");
             }
@@ -254,16 +262,16 @@ where
             // - `down` becomes the `dir` child of `up`.
             // - `across` goes from the `dir` child of `up` to the `!dir` child of `down`.
             let dir = if T::links(down).as_ref().right() == Some(up) {
-                LEFT
+                Dir::Left
             } else {
-                RIGHT
+                Dir::Right
             };
 
-            println!("rotate {}", if dir == 0 { "left" } else { "right" });
+            println!("rotate {dir:?}");
             assert!(self.root.map(|r| r != up).unwrap_or(false));
 
             let across = T::links(up).as_ref().child(dir);
-            T::links(down).as_mut().set_child(dir ^ 1, across);
+            T::links(down).as_mut().set_child(!dir, across);
             self.maybe_set_parent(across, Some(down));
 
             T::links(up).as_mut().set_child(dir, Some(down));
@@ -283,12 +291,12 @@ where
     fn rotate_twice_at(&mut self, down_second: NonNull<T>, down_first: NonNull<T>, up: NonNull<T>) {
         unsafe {
             let dir = if T::links(down_first).as_ref().right() == Some(up) {
-                RIGHT
+                Dir::Right
             } else {
-                LEFT
+                Dir::Left
             };
 
-            let across_first = T::links(up).as_ref().child(dir ^ 1);
+            let across_first = T::links(up).as_ref().child(!dir);
             let across_second = T::links(up).as_ref().child(dir);
 
             self.maybe_set_parent(across_first, Some(down_first));
@@ -300,11 +308,11 @@ where
 
             T::links(down_second)
                 .as_mut()
-                .set_child(dir ^ 1, across_second);
+                .set_child(!dir, across_second);
             let parent = T::links(down_second).as_mut().set_parent(Some(up));
 
             T::links(up).as_mut().set_parent(parent);
-            T::links(up).as_mut().set_child(dir ^ 1, Some(down_first));
+            T::links(up).as_mut().set_child(!dir, Some(down_first));
             T::links(up).as_mut().set_child(dir, Some(down_second));
 
             match parent {
@@ -377,9 +385,9 @@ where
         let z = parent;
         unsafe {
             let rotate_dir = if T::links(parent).as_ref().left() == Some(x) {
-                RIGHT
+                Dir::Right
             } else {
-                LEFT
+                Dir::Left
             };
 
             let y = T::links(x).as_ref().child(rotate_dir);
@@ -545,8 +553,8 @@ where
 
         // Here we give up on descriptive names entirely and just use the names from the paper.
         let z = parent;
-        let v = T::links(y).as_ref().child(dir as usize).unwrap();
-        let w = T::links(y).as_ref().child(dir as usize ^ 1).unwrap();
+        let v = T::links(y).as_ref().child(dir).unwrap();
+        let w = T::links(y).as_ref().child(!dir).unwrap();
 
         if self.is_2_child(y, w) {
             self.rotate_twice_at(z, y, v);
@@ -809,10 +817,7 @@ impl<T: ?Sized, K: Ord> Links<T, K> {
 
     #[inline]
     fn is_leaf(&self) -> bool {
-        unsafe {
-            (*self.inner.get()).children[LEFT].is_none()
-                && (*self.inner.get()).children[RIGHT].is_none()
-        }
+        self.left().is_none() && self.right().is_none()
     }
 
     #[inline]
@@ -826,18 +831,18 @@ impl<T: ?Sized, K: Ord> Links<T, K> {
     }
 
     #[inline]
-    fn child(&self, dir: usize) -> Link<T> {
-        unsafe { (*self.inner.get()).children[dir] }
+    fn child(&self, dir: Dir) -> Link<T> {
+        unsafe { (*self.inner.get()).children[dir as usize] }
     }
 
     #[inline]
     fn left(&self) -> Link<T> {
-        self.child(LEFT)
+        self.child(Dir::Left)
     }
 
     #[inline]
     fn right(&self) -> Link<T> {
-        self.child(RIGHT)
+        self.child(Dir::Right)
     }
 
     #[inline]
@@ -851,18 +856,18 @@ impl<T: ?Sized, K: Ord> Links<T, K> {
     }
 
     #[inline]
-    fn set_child(&mut self, dir: usize, child: Link<T>) -> Link<T> {
-        mem::replace(&mut self.inner.get_mut().children[dir], child)
+    fn set_child(&mut self, dir: Dir, child: Link<T>) -> Link<T> {
+        mem::replace(&mut self.inner.get_mut().children[dir as usize], child)
     }
 
     #[inline]
     fn set_left(&mut self, left: Link<T>) -> Link<T> {
-        self.set_child(LEFT, left)
+        self.set_child(Dir::Left, left)
     }
 
     #[inline]
     fn set_right(&mut self, right: Link<T>) -> Link<T> {
-        self.set_child(RIGHT, right)
+        self.set_child(Dir::Right, right)
     }
 
     #[inline]
