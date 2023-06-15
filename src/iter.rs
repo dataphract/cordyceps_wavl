@@ -7,6 +7,9 @@ enum CameFrom {
     PostChild,
 }
 
+/// An iterator over the items in a [`WavlTree`] in sorted order.
+///
+/// This struct is created via [`WavlTree::iter`].
 pub struct Iter<'tree, T: TreeNode<Links<T>> + ?Sized> {
     tree: &'tree WavlTree<T>,
 

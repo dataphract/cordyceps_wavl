@@ -1,7 +1,11 @@
 //! An intrusive weak AVL tree, or WAVL tree.
 //!
-//! The WAVL tree is a self-balancing binary search tree related to the AVL tree and red-black tree.
-
+//! A WAVL tree is a self-balancing binary search tree. WAVL trees allow insertion, lookup and
+//! deletion in O(log<sub>2</sub>N) time with a constant number of tree rotations in the worst case.
+//!
+//! WAVL trees are described in the paper [Rank-Balanced Trees] by Haeupler, Sen and Tarjan.
+//!
+//! [Rank-Balanced Trees]: http://arks.princeton.edu/ark:/88435/pr1nz5z
 //#![no_std]
 
 // Conventions used in comments are from Hauepler, Sen and Tarjan:
@@ -36,7 +40,6 @@
 //    c. `r(c) ∈ {-1, 0}` (by ())
 //    d. `n`'s one child `c` has
 //
-
 use core::{
     borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
     pin::Pin, ptr::NonNull,
@@ -55,10 +58,6 @@ pub trait TreeNode<L>: Linked<L> {
 }
 
 /// An intrusive weak AVL tree, or WAVL tree.
-///
-/// Implementation based on the paper [Rank-Balanced Trees] by Hauepler, Sen and Tarjan.
-///
-/// [Rank-Balanced Trees]: http://arks.princeton.edu/ark:/88435/pr1nz5z
 pub struct WavlTree<T>
 where
     T: TreeNode<Links<T>> + ?Sized,
@@ -398,7 +397,7 @@ where
 
     /// Inserts an item into the tree.
     ///
-    /// This operation completes in _O(log(n))_ time.
+    /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
     pub fn insert(&mut self, item: T::Handle) {
         let ptr = T::into_ptr(item);
 
@@ -554,6 +553,8 @@ where
     }
 
     /// Removes an arbitrary node from the tree.
+    ///
+    /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
     ///
     /// # Safety
     ///
