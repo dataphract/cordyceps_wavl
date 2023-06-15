@@ -43,7 +43,8 @@ use core::{
 };
 
 use cordyceps::Linked;
-use iter::Iter;
+
+pub use crate::iter::Iter;
 
 mod iter;
 
