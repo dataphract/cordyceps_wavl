@@ -35,10 +35,9 @@
 //
 
 use core::{
-    cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not, pin::Pin,
-    ptr::NonNull,
+    borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
+    pin::Pin, ptr::NonNull,
 };
-use std::borrow::Borrow;
 
 use cordyceps::Linked;
 
@@ -373,11 +372,9 @@ where
         }
     }
 
-    fn sibling(&self, node: NonNull<T>) -> Link<T> {
+    fn sibling(&self, parent: NonNull<T>, node: Option<NonNull<T>>) -> Link<T> {
         unsafe {
-            let parent = T::links(node).as_ref().parent()?;
-
-            if T::links(parent).as_ref().left() == Some(node) {
+            if T::links(parent).as_ref().left() == node {
                 T::links(parent).as_ref().right()
             } else {
                 T::links(parent).as_ref().left()
@@ -484,7 +481,7 @@ where
                 x_rank = T::links(x).as_ref().rank();
                 parent_rank = T::links(parent).as_ref().rank();
                 sibling_rank = self
-                    .sibling(x)
+                    .sibling(parent, Some(x))
                     .map(|sib| T::links(sib).as_ref().rank())
                     .unwrap_or(-1);
             }
@@ -591,7 +588,7 @@ where
 
             enum Violation<T: ?Sized> {
                 None,
-                ThreeChild(NonNull<T>, NonNull<T>),
+                ThreeChild(NonNull<T>, Option<NonNull<T>>),
                 TwoTwoLeaf(Option<NonNull<T>>, NonNull<T>),
             }
 
@@ -601,7 +598,7 @@ where
                     let successor_right = T::links(successor).as_ref().right();
 
                     let successor_was_2_child =
-                        self.is_2_child(successor_parent.unwrap_or(node), successor);
+                        self.is_2_child(successor_parent.unwrap_or(node), Some(successor));
 
                     if let Some(successor_parent) = successor_parent {
                         // Elevate the successor's right child to replace it.
@@ -622,12 +619,11 @@ where
 
                     T::links(left).as_mut().set_parent(Some(successor));
 
-                    // If the successor has a right child and was a 2-child, its child becomes a
+                    // If the successor was a 2-child, its child (which may be None) becomes a
                     // 3-child; otherwise, if the successor is not `right`, and its parent is unary,
                     // its parent becomes a 2-2 leaf; otherwise the rank rule holds.
-                    successor_right
-                        .filter(|_| successor_was_2_child)
-                        .map(|sr| Violation::ThreeChild(successor, sr))
+                    successor_was_2_child
+                        .then_some(Violation::ThreeChild(successor, successor_right))
                         .or_else(|| {
                             successor_parent
                                 .filter(|&p| T::links(p).as_ref().is_leaf())
@@ -648,7 +644,7 @@ where
                         .filter(|&p| {
                             T::links(p).as_ref().rank() - T::links(node).as_ref().rank() == 2
                         })
-                        .map(|parent| Violation::ThreeChild(parent, node))
+                        .map(|parent| Violation::ThreeChild(parent, Some(node)))
                         .unwrap_or(Violation::None)
                 }
 
@@ -656,10 +652,18 @@ where
                     self.replace_child_or_set_root(parent, node, None);
 
                     // The removed node was a leaf and thus 1,1. If its parent was unary, the parent
-                    // becomes a 2,2 leaf; otherwise the rank rule holds.
+                    // becomes a 2,2 leaf; if it was a 2-child, the missing node that replaces it
+                    // becomes a 3-child; otherwise the rank rule holds.
                     parent
-                        .filter(|&p| T::links(p).as_ref().is_leaf())
-                        .map(|p| Violation::TwoTwoLeaf(T::links(p).as_ref().parent(), p))
+                        .and_then(|p| {
+                            if T::links(p).as_ref().is_leaf() {
+                                Some(Violation::TwoTwoLeaf(T::links(p).as_ref().parent(), p))
+                            } else if T::links(p).as_ref().is_unary() {
+                                Some(Violation::ThreeChild(p, None))
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or(Violation::None)
                 }
             };
@@ -673,8 +677,8 @@ where
                     self.demote(leaf);
 
                     if let Some(parent) = parent {
-                        if self.is_3_child(parent, leaf) {
-                            self.rebalance_3_child(parent, leaf);
+                        if self.is_3_child(parent, Some(leaf)) {
+                            self.rebalance_3_child(parent, Some(leaf));
                         }
                     }
                 }
@@ -686,12 +690,12 @@ where
         }
     }
 
-    unsafe fn rebalance_3_child(&mut self, mut parent: NonNull<T>, child: NonNull<T>) {
+    unsafe fn rebalance_3_child(&mut self, mut parent: NonNull<T>, child: Option<NonNull<T>>) {
         let mut x = child;
-        let mut y = self.sibling(x).unwrap();
+        let mut y = self.sibling(parent, x).unwrap();
 
         loop {
-            if self.is_2_child(parent, y) {
+            if self.is_2_child(parent, Some(y)) {
                 self.demote(parent);
             } else if self.is_2_2(y) {
                 self.demote(y);
@@ -700,9 +704,15 @@ where
                 break;
             }
 
-            x = parent;
-            parent = T::links(x).as_ref().parent().expect("should have a parent");
-            y = self.sibling(x).expect("should have a sibling");
+            let grandparent = match T::links(parent).as_ref().parent() {
+                Some(p) => p,
+                None => break,
+            };
+            x = Some(parent);
+            y = self
+                .sibling(grandparent, Some(parent))
+                .expect("should have a sibling");
+            parent = grandparent
         }
 
         if !self.is_3_child(parent, x) {
@@ -713,10 +723,10 @@ where
 
         // Here we give up on descriptive names entirely and just use the names from the paper.
         let z = parent;
-        let v = T::links(y).as_ref().child(dir).unwrap();
-        let w = T::links(y).as_ref().child(!dir).unwrap();
+        let w = T::links(y).as_ref().child(!dir);
 
         if self.is_2_child(y, w) {
+            let v = T::links(y).as_ref().child(dir).unwrap();
             self.rotate_twice_at(z, y, v);
             self.promote_twice(v);
             self.demote(y);
@@ -816,16 +826,30 @@ where
         }
     }
 
-    unsafe fn is_2_child(&self, parent: NonNull<T>, child: NonNull<T>) -> bool {
-        unsafe { T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 2 }
+    unsafe fn is_2_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
+        unsafe {
+            match child {
+                Some(child) => {
+                    T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 2
+                }
+                None => T::links(parent).as_ref().rank() == 1,
+            }
+        }
     }
 
-    unsafe fn is_3_child(&self, parent: NonNull<T>, child: NonNull<T>) -> bool {
-        unsafe { T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 3 }
+    unsafe fn is_3_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
+        unsafe {
+            match child {
+                Some(child) => {
+                    T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 3
+                }
+                None => T::links(parent).as_ref().rank() == 2,
+            }
+        }
     }
 
-    unsafe fn which_child(&self, parent: NonNull<T>, child: NonNull<T>) -> Dir {
-        if T::links(parent).as_ref().left() == Some(child) {
+    unsafe fn which_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> Dir {
+        if T::links(parent).as_ref().left() == child {
             Dir::Left
         } else {
             Dir::Right
@@ -858,6 +882,11 @@ impl<T: ?Sized> Links<T> {
     #[inline]
     fn is_leaf(&self) -> bool {
         self.left().is_none() && self.right().is_none()
+    }
+
+    #[inline]
+    fn is_unary(&self) -> bool {
+        self.left().is_some() != self.right().is_some()
     }
 
     #[inline]
@@ -1074,5 +1103,36 @@ mod tests {
         insert_remove_all(&[1, 2, 0]);
         insert_remove_all(&[2, 0, 1]);
         insert_remove_all(&[2, 1, 0]);
+    }
+
+    #[test]
+    fn remove_four() {
+        insert_remove_all(&[0, 1, 2, 3]);
+        insert_remove_all(&[0, 1, 3, 2]);
+        insert_remove_all(&[0, 2, 1, 3]);
+        insert_remove_all(&[0, 2, 3, 1]);
+        insert_remove_all(&[0, 3, 1, 2]);
+        insert_remove_all(&[0, 3, 2, 1]);
+
+        insert_remove_all(&[1, 0, 2, 3]);
+        insert_remove_all(&[1, 0, 3, 2]);
+        insert_remove_all(&[1, 2, 0, 3]);
+        insert_remove_all(&[1, 2, 3, 0]);
+        insert_remove_all(&[1, 3, 0, 2]);
+        insert_remove_all(&[1, 3, 2, 0]);
+
+        insert_remove_all(&[2, 0, 1, 3]);
+        insert_remove_all(&[2, 0, 3, 1]);
+        insert_remove_all(&[2, 1, 0, 3]);
+        insert_remove_all(&[2, 1, 3, 0]);
+        insert_remove_all(&[2, 3, 0, 1]);
+        insert_remove_all(&[2, 3, 1, 0]);
+
+        insert_remove_all(&[3, 0, 1, 2]);
+        insert_remove_all(&[3, 0, 2, 1]);
+        insert_remove_all(&[3, 1, 0, 2]);
+        insert_remove_all(&[3, 1, 2, 0]);
+        insert_remove_all(&[3, 2, 0, 1]);
+        insert_remove_all(&[3, 2, 1, 0]);
     }
 }
