@@ -57,7 +57,7 @@ fn main() {
         key: 3,
     }));
 
-    for elem in tree.iter() {
+    for elem in tree.iter().rev() {
         println!("key: {}", elem.key);
     }
 

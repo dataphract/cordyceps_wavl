@@ -2,16 +2,16 @@ use crate::{Dir, Link, Links, TreeNode, WavlTree};
 
 enum CameFrom {
     Parent,
-    LeftChild,
+    PreChild,
     Here,
-    RightChild,
+    PostChild,
 }
 
 pub struct Iter<'tree, T: TreeNode<Links<T>> + ?Sized> {
     tree: &'tree WavlTree<T>,
 
-    front_cur: Link<T>,
-    front_from: CameFrom,
+    cur: [Link<T>; 2],
+    from: [CameFrom; 2],
 
     len: usize,
 }
@@ -21,9 +21,78 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iter<'tree, T> {
         Iter {
             tree,
 
-            front_cur: tree.root,
-            front_from: CameFrom::Parent,
+            cur: [tree.root, tree.root],
+            from: [CameFrom::Parent, CameFrom::Parent],
             len: tree.len(),
+        }
+    }
+}
+
+fn next_either<'tree, T>(it: &mut Iter<'tree, T>, dir: Dir) -> Option<&'tree T>
+where
+    T: TreeNode<Links<T>> + ?Sized,
+{
+    if it.len == 0 {
+        return None;
+    }
+
+    let mut cur = it.cur[dir as usize]?;
+
+    loop {
+        match it.from[dir as usize] {
+            CameFrom::Parent => {
+                // Upon entering a new subtree, find the {minimum,maximum} element.
+                while let Some(pre_child) = unsafe { T::links(cur).as_ref().child(dir) } {
+                    cur = pre_child;
+                }
+
+                // Once the {minimum,maximum} is found, its (empty) {left,right} subtree has been exhausted.
+                it.from[dir as usize] = CameFrom::PreChild;
+            }
+
+            CameFrom::PreChild => {
+                // The {left,right} subtree has been exhausted, so this node is up next. Save off the
+                // iterator state and return it.
+                it.cur[dir as usize] = Some(cur);
+                it.from[dir as usize] = CameFrom::Here;
+                it.len -= 1;
+
+                return Some(unsafe { cur.as_ref() });
+            }
+
+            CameFrom::Here => {
+                // The current node was just yielded.
+                if let Some(post_child) = unsafe { T::links(cur).as_ref().child(!dir) } {
+                    // If the {right,left} subtree is not empty, go there.
+                    it.from[dir as usize] = CameFrom::Parent;
+
+                    cur = post_child;
+                } else if let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
+                    // Otherwise, ascend one level.
+                    it.from[dir as usize] = match unsafe { it.tree.which_child(parent, Some(cur)) }
+                    {
+                        d if d == dir => CameFrom::PreChild,
+                        _ => CameFrom::PostChild,
+                    };
+
+                    cur = parent;
+                } else {
+                    unreachable!()
+                }
+            }
+
+            CameFrom::PostChild => {
+                // Ascend until we find the successor element.
+                while let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
+                    match unsafe { it.tree.which_child(parent, Some(cur)) } {
+                        d if d == dir => break,
+                        _ => cur = parent,
+                    }
+                }
+
+                it.cur[dir as usize] = Some(cur);
+                it.from[dir as usize] = CameFrom::PreChild;
+            }
         }
     }
 }
@@ -32,68 +101,12 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iterator for Iter<'tree, T> {
     type Item = &'tree T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.len == 0 {
-            return None;
-        }
+        next_either(self, Dir::Left)
+    }
+}
 
-        let mut cur = self.front_cur?;
-
-        loop {
-            match self.front_from {
-                CameFrom::Parent => {
-                    // Upon entering a new subtree, find the minimum element.
-                    while let Some(left) = unsafe { T::links(cur).as_ref().left() } {
-                        cur = left;
-                    }
-
-                    // Once the minimum is found, its (empty) left subtree has been exhausted.
-                    self.front_from = CameFrom::LeftChild;
-                }
-
-                CameFrom::LeftChild => {
-                    // The left subtree has been exhausted, so this node is up next. Save off the
-                    // iterator state and return it.
-                    self.front_cur = Some(cur);
-                    self.front_from = CameFrom::Here;
-                    self.len -= 1;
-
-                    return Some(unsafe { cur.as_ref() });
-                }
-
-                CameFrom::Here => {
-                    // The current node was just yielded.
-                    if let Some(right) = unsafe { T::links(cur).as_ref().right() } {
-                        // If the right subtree is not empty, go there.
-                        self.front_from = CameFrom::Parent;
-
-                        cur = right;
-                    } else if let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
-                        // Otherwise, ascend one level.
-                        self.front_from = match unsafe { self.tree.which_child(parent, Some(cur)) }
-                        {
-                            Dir::Left => CameFrom::LeftChild,
-                            Dir::Right => CameFrom::RightChild,
-                        };
-
-                        cur = parent;
-                    } else {
-                        unreachable!()
-                    }
-                }
-
-                CameFrom::RightChild => {
-                    // Ascend until we find the successor element.
-                    while let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
-                        match unsafe { self.tree.which_child(parent, Some(cur)) } {
-                            Dir::Left => break,
-                            Dir::Right => cur = parent,
-                        }
-                    }
-
-                    self.front_cur = Some(cur);
-                    self.front_from = CameFrom::LeftChild;
-                }
-            }
-        }
+impl<'tree, T: TreeNode<Links<T>> + ?Sized> DoubleEndedIterator for Iter<'tree, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        next_either(self, Dir::Right)
     }
 }
