@@ -114,7 +114,7 @@ where
         WavlTree { root: None, len: 0 }
     }
 
-    /// Returns `true` if the map contains no elements.
+    /// Returns `true` if the tree contains no elements.
     pub const fn is_empty(&self) -> bool {
         let empty = self.len() == 0;
 
