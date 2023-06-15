@@ -57,6 +57,10 @@ fn main() {
         key: 3,
     }));
 
+    for elem in tree.iter() {
+        println!("key: {}", elem.key);
+    }
+
     let node = tree.get(&0).expect("item not found");
     unsafe { tree.remove(node.get_ref().into()) };
     tree.assert_invariants();

@@ -1,4 +1,7 @@
 //! An intrusive weak AVL tree, or WAVL tree.
+//!
+//! The WAVL tree is a self-balancing binary search tree related to the AVL tree and red-black tree.
+
 //#![no_std]
 
 // Conventions used in comments are from Hauepler, Sen and Tarjan:
@@ -40,6 +43,9 @@ use core::{
 };
 
 use cordyceps::Linked;
+use iter::Iter;
+
+mod iter;
 
 pub trait TreeNode<L>: Linked<L> {
     type Key: Ord + fmt::Debug;
@@ -60,9 +66,16 @@ where
     len: usize,
 }
 
+/// Links to other nodes in a [`WavlTree`].
+///
+/// In order to be part of a [`WavlTree`], a type must contain a value of this type, and must
+/// implement the [`TreeNode`] trait for [`Links<Self>`].
 pub struct Links<T: ?Sized> {
     inner: UnsafeCell<LinksInner<T>>,
 }
+
+unsafe impl<T: Send> Send for Links<T> {}
+unsafe impl<T: Sync> Sync for Links<T> {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Dir {
@@ -573,7 +586,8 @@ where
         // 2. There exists exactly one leaf node which is a 3-child.
         // 3. There exists exactly one leaf node which is 2,2.
         //
-        // [^1]: The successor of a node `a` is the least node in `a`'s right subtree.
+        // [^1]: The successor of a node `a` is the least node in `a`'s right subtree (if `a` has a
+        //       right subtree).
         // [^2]: Unary nodes have rank 1 and are 1,2 by construction; the missing child has rank -1
         //       and is a 2-child, and the present child has rank 0 and is a 1-child. Thus the
         //       elevation (not promotion) of a unary 2-child's sole child always results in a
@@ -773,6 +787,12 @@ where
         debug_assert_eq!(self.len(), 0);
     }
 
+    /// Returns an iterator over the items in the tree, sorted by key.
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter::new(self)
+    }
+
     // Support methods ========================================================
 
     #[inline]
@@ -867,6 +887,7 @@ where
 }
 
 impl<T: ?Sized> Links<T> {
+    /// Returns new links for a [`WavlTree`].
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -877,6 +898,12 @@ impl<T: ?Sized> Links<T> {
                 _unpin: PhantomPinned,
             }),
         }
+    }
+
+    /// Returns `true` if this node is currently linked into a [`WavlTree`].
+    pub fn is_linked(&self) -> bool {
+        let inner = unsafe { &*self.inner.get() };
+        inner.parent.is_some() || inner.children[0].is_some() || inner.children[1].is_some()
     }
 
     #[inline]
