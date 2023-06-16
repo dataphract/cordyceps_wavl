@@ -43,7 +43,6 @@ where
     let mut cur = it.cur[dir as usize]?;
 
     loop {
-        println!("{:?}", it.from[dir as usize]);
         match it.from[dir as usize] {
             CameFrom::Parent => {
                 // Upon entering a new subtree, find the {minimum,maximum} element.
@@ -61,7 +60,6 @@ where
                 it.cur[dir as usize] = Some(cur);
                 it.from[dir as usize] = CameFrom::Here;
                 it.len -= 1;
-                println!("---");
 
                 return Some(unsafe { cur.as_ref() });
             }
