@@ -76,6 +76,7 @@ fn main() {
     println!("{:?}", tree.iter().map(|node| node.key).collect::<Vec<_>>());
 
     let zero = tree.pop_first().unwrap().key;
+    println!("{:?}", tree.iter().map(|node| node.key).collect::<Vec<_>>());
     assert_eq!(zero, 0);
     tree.assert_invariants();
 

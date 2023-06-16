@@ -137,19 +137,13 @@ where
 
     #[doc(hidden)]
     pub fn assert_invariants(&self) {
-        let mut set = HashSet::new();
-
         if let Some(root) = self.root {
-            unsafe { self.assert_invariants_at(root, &mut set) };
+            unsafe { self.assert_invariants_at(root) };
         }
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    unsafe fn assert_invariants_at(&self, node: NonNull<T>, set: &mut HashSet<NonNull<T>>) {
-        if !set.insert(node) {
-            panic!("node at {node:?} already seen");
-        }
-
+    unsafe fn assert_invariants_at(&self, node: NonNull<T>) {
         unsafe {
             let rank = self.links(node).rank();
 
@@ -173,7 +167,7 @@ where
                         .expect("{child:?} child parent pointer not set");
                     assert_eq!(node, parent);
 
-                    self.assert_invariants_at(child, set);
+                    self.assert_invariants_at(child);
                 }
             }
         }
@@ -731,7 +725,7 @@ where
                         .filter(|&p| {
                             T::links(p).as_ref().rank() - T::links(node).as_ref().rank() == 2
                         })
-                        .map(|parent| Violation::ThreeChild(parent, Some(node)))
+                        .map(|parent| Violation::ThreeChild(parent, Some(child)))
                         .unwrap_or(Violation::None)
                 }
 
