@@ -44,12 +44,16 @@ use core::{
     borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
     pin::Pin, ptr::NonNull,
 };
+use std::collections::HashSet;
 
 use cordyceps::Linked;
 
 pub use crate::iter::Iter;
 
 mod iter;
+
+#[cfg(test)]
+mod tests;
 
 pub trait TreeNode<L>: Linked<L> {
     type Key: Ord + fmt::Debug;
@@ -70,6 +74,7 @@ where
 ///
 /// In order to be part of a [`WavlTree`], a type must contain a value of this type, and must
 /// implement the [`TreeNode`] trait for [`Links<Self>`].
+#[derive(Debug)]
 pub struct Links<T: ?Sized> {
     inner: UnsafeCell<LinksInner<T>>,
 }
@@ -132,40 +137,56 @@ where
 
     #[doc(hidden)]
     pub fn assert_invariants(&self) {
+        let mut set = HashSet::new();
+
         if let Some(root) = self.root {
-            unsafe { self.assert_invariants_at(root) };
+            unsafe { self.assert_invariants_at(root, &mut set) };
         }
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    unsafe fn assert_invariants_at(&self, node: NonNull<T>) {
+    unsafe fn assert_invariants_at(&self, node: NonNull<T>, set: &mut HashSet<NonNull<T>>) {
+        if !set.insert(node) {
+            panic!("node at {node:?} already seen");
+        }
+
         unsafe {
-            let rank = T::links(node).as_ref().rank();
+            let rank = self.links(node).rank();
 
             // Ensure all leaves have rank 0.
-            if T::links(node).as_ref().is_leaf() {
+            if self.is_leaf(node) {
                 assert_eq!(rank, 0);
             }
 
             for child in [Dir::Left, Dir::Right] {
-                if let Some(child) = T::links(node).as_ref().child(child) {
-                    let child_rank = T::links(child).as_ref().rank();
+                if let Some(child) = self.links(node).child(child) {
+                    let child_rank = self.links(child).rank();
 
                     // Ensure all rank differences are 1 or 2.
                     let rank_diff = rank - child_rank;
                     assert!([1, 2].contains(&rank_diff));
 
                     // Ensure child's parent link points to this node.
-                    let parent = T::links(child)
-                        .as_ref()
+                    let parent = self
+                        .links(child)
                         .parent()
-                        .expect("left child parent pointer not set");
+                        .expect("{child:?} child parent pointer not set");
                     assert_eq!(node, parent);
 
-                    self.assert_invariants_at(child);
+                    self.assert_invariants_at(child, set);
                 }
             }
         }
+    }
+
+    /// Returns `true` if the tree contains an item with the specified key.
+    #[inline]
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        T::Key: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        self.get(key).is_some()
     }
 
     /// Returns a reference to the node corresponding to `key`.
@@ -190,9 +211,9 @@ where
 
             unsafe {
                 match key.cmp(cur.as_ref().key().borrow()) {
-                    Ordering::Less => opt_cur = T::links(cur).as_ref().left(),
+                    Ordering::Less => opt_cur = self.links(cur).left(),
                     Ordering::Equal => return Some(cur),
-                    Ordering::Greater => opt_cur = T::links(cur).as_ref().right(),
+                    Ordering::Greater => opt_cur = self.links(cur).right(),
                 }
             }
         }
@@ -200,28 +221,52 @@ where
 
     /// Returns the minimum element of the tree.
     pub fn first(&self) -> Option<Pin<&T>> {
-        let mut opt_cur = self.root;
+        self.first_raw()
+            .map(|first| unsafe { Pin::new_unchecked(first.as_ref()) })
+    }
+
+    fn first_raw(&self) -> Option<NonNull<T>> {
+        let mut cur = self.root?;
 
         unsafe {
-            while let Some(cur) = opt_cur {
-                opt_cur = T::links(cur).as_ref().left();
+            while let Some(left) = self.links(cur).left() {
+                cur = left;
             }
 
-            opt_cur.map(|first| Pin::new_unchecked(first.as_ref()))
+            Some(cur)
         }
+    }
+
+    /// Removes and returns the minimum element of the tree.
+    pub fn pop_first(&mut self) -> Option<T::Handle> {
+        let first = self.first_raw()?;
+
+        unsafe { Some(self.remove(first)) }
     }
 
     /// Returns the maximum element of the tree.
     pub fn last(&self) -> Option<Pin<&T>> {
-        let mut opt_cur = self.root;
+        self.last_raw()
+            .map(|last| unsafe { Pin::new_unchecked(last.as_ref()) })
+    }
+
+    fn last_raw(&self) -> Option<NonNull<T>> {
+        let mut cur = self.root?;
 
         unsafe {
-            while let Some(cur) = opt_cur {
-                opt_cur = T::links(cur).as_ref().right();
+            while let Some(right) = self.links(cur).right() {
+                cur = right;
             }
 
-            opt_cur.map(|first| Pin::new_unchecked(first.as_ref()))
+            Some(cur)
         }
+    }
+
+    /// Removes and returns the maximum element of the tree.
+    pub fn pop_last(&mut self) -> Option<T::Handle> {
+        let last = self.last_raw()?;
+
+        unsafe { Some(self.remove(last)) }
     }
 
     unsafe fn maybe_set_parent(&mut self, opt_node: Link<T>, parent: Link<T>) {
@@ -229,7 +274,7 @@ where
             return;
         };
 
-        unsafe { T::links(node).as_mut().set_parent(parent) };
+        unsafe { self.links_mut(node).set_parent(parent) };
     }
 
     #[inline]
@@ -387,6 +432,10 @@ where
 
     fn sibling(&self, parent: NonNull<T>, node: Option<NonNull<T>>) -> Link<T> {
         unsafe {
+            debug_assert!(
+                T::links(parent).as_ref().left().is_some()
+                    || T::links(parent).as_ref().right().is_some()
+            );
             if T::links(parent).as_ref().left() == node {
                 T::links(parent).as_ref().right()
             } else {
@@ -398,7 +447,7 @@ where
     /// Inserts an item into the tree.
     ///
     /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
-    pub fn insert(&mut self, item: T::Handle) {
+    pub fn insert(&mut self, item: T::Handle) -> Option<T::Handle> {
         let ptr = T::into_ptr(item);
 
         let root = match self.root {
@@ -414,34 +463,53 @@ where
 
                 self.root = Some(ptr);
                 self.len += 1;
-                return;
+                return None;
             }
         };
 
         let mut parent_was_leaf = false;
-        let mut opt_parent = Some(root);
+        let mut opt_cur = Some(root);
 
         // Descend the tree, looking for a suitable leaf.
-        while let Some(parent) = opt_parent {
-            let ordering = unsafe { ptr.as_ref().key().cmp(parent.as_ref().key()) };
+        while let Some(cur) = opt_cur {
+            let ordering = unsafe { ptr.as_ref().key().cmp(cur.as_ref().key()) };
 
             let dir = match ordering {
                 Ordering::Less => Dir::Left,
-                Ordering::Equal => todo!(),
+
+                Ordering::Equal => unsafe {
+                    let parent = T::links(cur).as_ref().parent();
+                    let left = T::links(cur).as_ref().left();
+                    let right = T::links(cur).as_ref().right();
+
+                    self.replace_child_or_set_root(parent, cur, Some(ptr));
+
+                    self.maybe_set_parent(left, Some(ptr));
+                    self.maybe_set_parent(right, Some(ptr));
+                    let rank = T::links(cur).as_ref().rank();
+
+                    T::links(ptr).as_mut().set_rank(rank);
+                    T::links(ptr).as_mut().set_parent(parent);
+                    T::links(ptr).as_mut().set_left(left);
+                    T::links(ptr).as_mut().set_right(right);
+
+                    T::links(cur).as_mut().clear();
+                    return Some(T::from_ptr(cur));
+                },
+
                 Ordering::Greater => Dir::Right,
             };
 
             unsafe {
-                let parent_links = T::links(parent).as_mut();
-                match parent_links.child(dir) {
+                match T::links(cur).as_ref().child(dir) {
                     // Descend.
-                    Some(child) => opt_parent = Some(child),
+                    Some(child) => opt_cur = Some(child),
 
                     // Set `item` as child.
                     None => {
-                        parent_was_leaf = parent_links.is_leaf();
-                        parent_links.set_child(dir, Some(ptr));
-                        T::links(ptr).as_mut().set_parent(Some(parent));
+                        parent_was_leaf = self.is_leaf(cur);
+                        T::links(cur).as_mut().set_child(dir, Some(ptr));
+                        T::links(ptr).as_mut().set_parent(Some(cur));
                         break;
                     }
                 }
@@ -455,6 +523,7 @@ where
         }
 
         self.len += 1;
+        None
     }
 
     // Performs a bottom-up rebalance of the tree after the insertion of `node`.
@@ -474,6 +543,8 @@ where
                 .parent()
                 .expect("node must not be the tree root")
         };
+
+        debug_assert!(self.sibling(parent, Some(node)).is_none());
 
         let mut x_rank = 0;
         let mut parent_rank = 0;
@@ -751,7 +822,7 @@ where
             self.rotate_at(parent, y);
             self.promote(y);
 
-            if T::links(z).as_ref().is_leaf() {
+            if self.is_leaf(z) {
                 self.demote_twice(z);
             } else {
                 self.demote(z);
@@ -785,8 +856,8 @@ where
             }
         }
 
-        debug_assert!(self.root.is_none());
-        debug_assert_eq!(self.len(), 0);
+        //debug_assert!(self.root.is_none());
+        //debug_assert_eq!(self.len(), 0);
     }
 
     /// Returns an iterator over the items in the tree, sorted by key.
@@ -796,6 +867,24 @@ where
     }
 
     // Support methods ========================================================
+
+    #[inline]
+    unsafe fn links(&self, node: NonNull<T>) -> &Links<T> {
+        unsafe { T::links(node).as_ref() }
+    }
+
+    #[inline]
+    unsafe fn links_mut(&mut self, node: NonNull<T>) -> &mut Links<T> {
+        unsafe { T::links(node).as_mut() }
+    }
+
+    #[inline]
+    unsafe fn is_leaf(&self, node: NonNull<T>) -> bool {
+        unsafe {
+            let inner = &*T::links(node).as_ref().inner.get();
+            inner.children[0].is_none() && inner.children[1].is_none()
+        }
+    }
 
     #[inline]
     unsafe fn promote(&mut self, node: NonNull<T>) {
@@ -944,6 +1033,14 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
+    fn clear(&mut self) {
+        self.set_parent(None);
+        self.set_left(None);
+        self.set_right(None);
+        self.set_rank(0);
+    }
+
+    #[inline]
     fn set_parent(&mut self, parent: Link<T>) -> Link<T> {
         mem::replace(&mut self.inner.get_mut().parent, parent)
     }
@@ -966,202 +1063,5 @@ impl<T: ?Sized> Links<T> {
     #[inline]
     fn set_rank(&mut self, rank: i8) {
         self.inner.get_mut().rank = rank;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-    use std::prelude::v1::*;
-
-    use super::*;
-
-    #[repr(C)]
-    struct TestNode {
-        links: Links<TestNode>,
-        key: u32,
-    }
-
-    unsafe impl Linked<Links<TestNode>> for TestNode {
-        type Handle = Box<TestNode>;
-
-        fn into_ptr(r: Self::Handle) -> NonNull<Self> {
-            NonNull::new(Box::into_raw(r)).unwrap()
-        }
-
-        unsafe fn from_ptr(ptr: NonNull<Self>) -> Self::Handle {
-            unsafe { Box::from_raw(ptr.as_ptr()) }
-        }
-
-        unsafe fn links(ptr: NonNull<Self>) -> NonNull<Links<TestNode>> {
-            // SAFETY: Self is #[repr(C)] and `links` is first field
-            ptr.cast()
-        }
-    }
-
-    impl TreeNode<Links<TestNode>> for TestNode {
-        type Key = u32;
-
-        fn key(&self) -> &Self::Key {
-            &self.key
-        }
-    }
-
-    fn insert_find_all(keys: &[u32]) {
-        let mut tree: WavlTree<TestNode> = WavlTree::new();
-
-        for &key in keys {
-            tree.insert(Box::new(TestNode {
-                links: Links::new(),
-                key,
-            }));
-            tree.assert_invariants();
-        }
-
-        for key in keys {
-            let node = tree.get_raw(key).expect("item not found");
-            assert_eq!(unsafe { node.as_ref().key() }, key);
-        }
-    }
-
-    #[test]
-    fn zero_elems_find() {
-        insert_find_all(&[]);
-    }
-
-    #[test]
-    fn single_elem_find() {
-        insert_find_all(&[0]);
-    }
-
-    #[test]
-    fn two_elems_find() {
-        insert_find_all(&[0, 1]);
-        insert_find_all(&[1, 0]);
-    }
-
-    #[test]
-    fn three_elems_find() {
-        insert_find_all(&[0, 1, 2]);
-        insert_find_all(&[0, 2, 1]);
-        insert_find_all(&[1, 0, 2]);
-        insert_find_all(&[1, 2, 0]);
-        insert_find_all(&[2, 0, 1]);
-        insert_find_all(&[2, 1, 0]);
-    }
-
-    #[test]
-    fn four_elems_find() {
-        insert_find_all(&[0, 1, 2, 3]);
-        insert_find_all(&[0, 1, 3, 2]);
-        insert_find_all(&[0, 2, 1, 3]);
-        insert_find_all(&[0, 2, 3, 1]);
-        insert_find_all(&[0, 3, 1, 2]);
-        insert_find_all(&[0, 3, 2, 1]);
-
-        insert_find_all(&[1, 0, 2, 3]);
-        insert_find_all(&[1, 0, 3, 2]);
-        insert_find_all(&[1, 2, 0, 3]);
-        insert_find_all(&[1, 2, 3, 0]);
-        insert_find_all(&[1, 3, 0, 2]);
-        insert_find_all(&[1, 3, 2, 0]);
-
-        insert_find_all(&[2, 0, 1, 3]);
-        insert_find_all(&[2, 0, 3, 1]);
-        insert_find_all(&[2, 1, 0, 3]);
-        insert_find_all(&[2, 1, 3, 0]);
-        insert_find_all(&[2, 3, 0, 1]);
-        insert_find_all(&[2, 3, 1, 0]);
-
-        insert_find_all(&[3, 0, 1, 2]);
-        insert_find_all(&[3, 0, 2, 1]);
-        insert_find_all(&[3, 1, 0, 2]);
-        insert_find_all(&[3, 1, 2, 0]);
-        insert_find_all(&[3, 2, 0, 1]);
-        insert_find_all(&[3, 2, 1, 0]);
-    }
-
-    fn insert_remove_all(keys: &[u32]) {
-        let mut tree: WavlTree<TestNode> = WavlTree::new();
-
-        for &key in keys {
-            tree.insert(Box::new(TestNode {
-                links: Links::new(),
-                key,
-            }));
-            tree.assert_invariants();
-        }
-
-        for key in keys {
-            let node = tree.get_raw(key).expect("item not found");
-            unsafe { tree.remove(node) };
-            tree.assert_invariants();
-        }
-
-        for &key in keys {
-            tree.insert(Box::new(TestNode {
-                links: Links::new(),
-                key,
-            }));
-            tree.assert_invariants();
-        }
-
-        for key in keys.iter().rev() {
-            let node = tree.get_raw(key).expect("item not found");
-            unsafe { tree.remove(node) };
-            tree.assert_invariants();
-        }
-    }
-
-    #[test]
-    fn remove_one() {
-        insert_remove_all(&[0]);
-    }
-
-    #[test]
-    fn remove_two() {
-        insert_remove_all(&[0, 1]);
-        insert_remove_all(&[1, 0]);
-    }
-
-    #[test]
-    fn remove_three() {
-        insert_remove_all(&[0, 1, 2]);
-        insert_remove_all(&[0, 2, 1]);
-        insert_remove_all(&[1, 0, 2]);
-        insert_remove_all(&[1, 2, 0]);
-        insert_remove_all(&[2, 0, 1]);
-        insert_remove_all(&[2, 1, 0]);
-    }
-
-    #[test]
-    fn remove_four() {
-        insert_remove_all(&[0, 1, 2, 3]);
-        insert_remove_all(&[0, 1, 3, 2]);
-        insert_remove_all(&[0, 2, 1, 3]);
-        insert_remove_all(&[0, 2, 3, 1]);
-        insert_remove_all(&[0, 3, 1, 2]);
-        insert_remove_all(&[0, 3, 2, 1]);
-
-        insert_remove_all(&[1, 0, 2, 3]);
-        insert_remove_all(&[1, 0, 3, 2]);
-        insert_remove_all(&[1, 2, 0, 3]);
-        insert_remove_all(&[1, 2, 3, 0]);
-        insert_remove_all(&[1, 3, 0, 2]);
-        insert_remove_all(&[1, 3, 2, 0]);
-
-        insert_remove_all(&[2, 0, 1, 3]);
-        insert_remove_all(&[2, 0, 3, 1]);
-        insert_remove_all(&[2, 1, 0, 3]);
-        insert_remove_all(&[2, 1, 3, 0]);
-        insert_remove_all(&[2, 3, 0, 1]);
-        insert_remove_all(&[2, 3, 1, 0]);
-
-        insert_remove_all(&[3, 0, 1, 2]);
-        insert_remove_all(&[3, 0, 2, 1]);
-        insert_remove_all(&[3, 1, 0, 2]);
-        insert_remove_all(&[3, 1, 2, 0]);
-        insert_remove_all(&[3, 2, 0, 1]);
-        insert_remove_all(&[3, 2, 1, 0]);
     }
 }

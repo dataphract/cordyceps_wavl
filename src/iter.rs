@@ -1,5 +1,6 @@
 use crate::{Dir, Link, Links, TreeNode, WavlTree};
 
+#[derive(Debug)]
 enum CameFrom {
     Parent,
     PreChild,
@@ -42,6 +43,7 @@ where
     let mut cur = it.cur[dir as usize]?;
 
     loop {
+        println!("{:?}", it.from[dir as usize]);
         match it.from[dir as usize] {
             CameFrom::Parent => {
                 // Upon entering a new subtree, find the {minimum,maximum} element.
@@ -59,6 +61,7 @@ where
                 it.cur[dir as usize] = Some(cur);
                 it.from[dir as usize] = CameFrom::Here;
                 it.len -= 1;
+                println!("---");
 
                 return Some(unsafe { cur.as_ref() });
             }
@@ -87,9 +90,9 @@ where
             CameFrom::PostChild => {
                 // Ascend until we find the successor element.
                 while let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
-                    match unsafe { it.tree.which_child(parent, Some(cur)) } {
-                        d if d == dir => break,
-                        _ => cur = parent,
+                    cur = parent;
+                    if unsafe { it.tree.which_child(parent, Some(cur)) } == dir {
+                        break;
                     }
                 }
 
