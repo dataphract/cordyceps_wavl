@@ -88,8 +88,10 @@ where
             CameFrom::PostChild => {
                 // Ascend until we find the successor element.
                 while let Some(parent) = unsafe { T::links(cur).as_ref().parent() } {
+                    let which_child = unsafe { it.tree.which_child(parent, Some(cur)) };
                     cur = parent;
-                    if unsafe { it.tree.which_child(parent, Some(cur)) } == dir {
+
+                    if which_child == dir {
                         break;
                     }
                 }

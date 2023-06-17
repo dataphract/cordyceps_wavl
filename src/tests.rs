@@ -136,7 +136,7 @@ fn insert_remove_all(keys: &[u32]) {
 
     for key in keys {
         let node = tree.get_raw(key).expect("item not found");
-        unsafe { tree.remove(node) };
+        unsafe { tree.remove_at(node) };
         tree.assert_invariants();
     }
 
@@ -150,7 +150,7 @@ fn insert_remove_all(keys: &[u32]) {
 
     for key in keys.iter().rev() {
         let node = tree.get_raw(key).expect("item not found");
-        unsafe { tree.remove(node) };
+        unsafe { tree.remove_at(node) };
         tree.assert_invariants();
     }
 }
@@ -215,7 +215,7 @@ enum ItemValue {
 
 proptest::prop_compose! {
     fn index_strategy()(
-        index in proptest::num::usize::ANY,
+        index in 0usize..1000,
     ) -> ItemValue {
         ItemValue::Index(index)
     }
@@ -223,7 +223,7 @@ proptest::prop_compose! {
 
 proptest::prop_compose! {
     fn random_strategy()(
-        random in proptest::num::u32::ANY,
+        random in 0u32..1000,
     ) -> ItemValue {
         ItemValue::Random(random)
     }
@@ -238,6 +238,7 @@ enum Op {
     Insert(ItemValue),
     // TryInsert(ItemValue),
     Get(ItemValue),
+    Remove(ItemValue),
     First,
     PopFirst,
     Last,
@@ -262,6 +263,7 @@ impl Op {
         match self {
             Op::Insert(item) => FinalOp::Insert(get_value(sorted, item)),
             Op::Get(item) => FinalOp::Get(get_value(sorted, item)),
+            Op::Remove(item) => FinalOp::Remove(get_value(sorted, item)),
             Op::First => FinalOp::First,
             Op::PopFirst => FinalOp::PopFirst,
             Op::Last => FinalOp::Last,
@@ -274,6 +276,7 @@ impl Op {
 enum FinalOp {
     Insert(u32),
     Get(u32),
+    Remove(u32),
     First,
     PopFirst,
     Last,
@@ -285,6 +288,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         value_strategy().prop_map(Op::Insert),
         // value_strategy().prop_map(Op::TryInsert),
         value_strategy().prop_map(Op::Get),
+        value_strategy().prop_map(Op::Remove),
         Just(Op::First),
         Just(Op::PopFirst),
         Just(Op::Last),
@@ -322,8 +326,9 @@ fn run_btree_equivalence(ops: Vec<Op>) {
     }
 
     fn remove_sorted(v: &mut Vec<u32>, value: u32) {
-        let idx = v.binary_search(&value).unwrap();
-        v.insert(idx, value);
+        if let Ok(idx) = v.binary_search(&value) {
+            v.remove(idx);
+        }
     }
 
     #[inline]
@@ -340,12 +345,7 @@ fn run_btree_equivalence(ops: Vec<Op>) {
     for (op_id, op) in ops.into_iter().enumerate() {
         let final_op = op.finalize(&sorted_values);
         final_ops.push(final_op);
-
-        macro_rules! test_assert_eq {
-            ($left:expr, $right:expr, $($args:tt)*) => {
-                assert_eq!($left, $right, $($args)*);
-            };
-        }
+        println!("final_op: {final_op:?}");
 
         match final_op {
             FinalOp::Insert(value) => {
@@ -358,7 +358,7 @@ fn run_btree_equivalence(ops: Vec<Op>) {
                 };
                 let from_wavl = wavl.insert(TestNode::new(value)).map(node_key);
 
-                test_assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             // FinalOp::TryInsert(_) => todo!(),
@@ -366,39 +366,49 @@ fn run_btree_equivalence(ops: Vec<Op>) {
                 let from_btree = btree.get(&value);
                 let from_wavl = wavl.get(&value).map(pin_key);
 
-                test_assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+            }
+
+            FinalOp::Remove(value) => {
+                remove_sorted(&mut sorted_values, value);
+
+                let from_btree = btree.remove(&value).then_some(value);
+                let from_wavl = wavl.remove(&value).map(node_key);
+
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::First => {
                 let from_btree = btree.first();
                 let from_wavl = wavl.first().map(pin_key);
 
-                test_assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::PopFirst => {
                 let from_btree = btree.pop_first();
                 let from_wavl = wavl.pop_first().map(node_key);
 
-                test_assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::Last => {
                 let from_btree = btree.first();
                 let from_wavl = wavl.first().map(pin_key);
 
-                test_assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::PopLast => {
                 let from_btree = btree.pop_last();
                 let from_wavl = wavl.pop_last().map(node_key);
 
-                test_assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
         }
 
         wavl.assert_invariants();
         assert_eq!(btree.len(), wavl.len());
+        assert!(btree.iter().zip(wavl.iter()).all(|(&a, b)| a == b.key));
     }
 }

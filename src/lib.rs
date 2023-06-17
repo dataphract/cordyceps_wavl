@@ -44,7 +44,7 @@ use core::{
     borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
     pin::Pin, ptr::NonNull,
 };
-use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use cordyceps::Linked;
 
@@ -168,9 +168,75 @@ where
                     assert_eq!(node, parent);
 
                     self.assert_invariants_at(child);
+                } else {
+                    assert!(rank < 2);
                 }
             }
         }
+    }
+
+    pub fn dotgraph<'a, W, K>(&'a self, name: &str, mut w: W) -> fmt::Result
+    where
+        W: fmt::Write,
+        K: fmt::Display + From<&'a T::Key>,
+    {
+        let root = match self.root {
+            Some(r) => r,
+            None => return write!(w, "digraph \"graph-{name}\" {{}}"),
+        };
+
+        let mut queue = VecDeque::new();
+        queue.push_back(root);
+
+        write!(
+            w,
+            "digraph \"graph-{name}\" {{\n subgraph \"subgraph-{name}\" {{"
+        )?;
+
+        let mut links = String::new();
+        for _rank in 0.. {
+            use fmt::Write;
+            let remaining = queue.len();
+            if remaining == 0 {
+                break;
+            }
+
+            write!(w, "{{rank=same; ")?;
+
+            for _rank_node in 0..remaining {
+                let node = queue.pop_front().unwrap();
+
+                let key: K = unsafe { node.as_ref().key().into() };
+                let rank = unsafe { T::links(node).as_ref().rank() };
+                write!(w, "\"graph{name}-{key}\" [label=\"{key}:{rank}\"]; ")?;
+
+                if let Some(left) = unsafe { self.links(node).left() } {
+                    let child_key: K = unsafe { left.as_ref().key().into() };
+
+                    queue.push_back(left);
+                    writeln!(
+                        links,
+                        "\"graph{name}-{key}\" -> \"graph{name}-{child_key}\";"
+                    )?;
+                }
+
+                if let Some(right) = unsafe { self.links(node).right() } {
+                    let child_key: K = unsafe { right.as_ref().key().into() };
+
+                    queue.push_back(right);
+                    writeln!(
+                        links,
+                        "\"graph{name}-{key}\" -> \"graph{name}-{child_key}\";"
+                    )?;
+                }
+            }
+
+            writeln!(w, "}}")?;
+        }
+
+        w.write_str(&links)?;
+
+        w.write_str(" }\n}")
     }
 
     /// Returns `true` if the tree contains an item with the specified key.
@@ -193,7 +259,8 @@ where
         unsafe { Some(Pin::new_unchecked(ptr.as_ref())) }
     }
 
-    fn get_raw<Q>(&self, key: &Q) -> Link<T>
+    // TODO: un-pub me
+    pub fn get_raw<Q>(&self, key: &Q) -> Link<T>
     where
         T::Key: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
@@ -235,7 +302,7 @@ where
     pub fn pop_first(&mut self) -> Option<T::Handle> {
         let first = self.first_raw()?;
 
-        unsafe { Some(self.remove(first)) }
+        unsafe { Some(self.remove_at(first)) }
     }
 
     /// Returns the maximum element of the tree.
@@ -260,7 +327,7 @@ where
     pub fn pop_last(&mut self) -> Option<T::Handle> {
         let last = self.last_raw()?;
 
-        unsafe { Some(self.remove(last)) }
+        unsafe { Some(self.remove_at(last)) }
     }
 
     unsafe fn maybe_set_parent(&mut self, opt_node: Link<T>, parent: Link<T>) {
@@ -617,6 +684,18 @@ where
         (cur, parent)
     }
 
+    /// Removes the element associated with `key` from the tree.
+    ///
+    /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<T::Handle>
+    where
+        T::Key: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        self.get_raw(key)
+            .map(|node| unsafe { self.remove_at(node) })
+    }
+
     /// Removes an arbitrary node from the tree.
     ///
     /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
@@ -625,7 +704,7 @@ where
     ///
     /// It is the caller's responsibility to ensure that `node` is an element of `self`, and not any
     /// other tree.
-    pub unsafe fn remove(&mut self, node: NonNull<T>) -> T::Handle {
+    pub unsafe fn remove_at(&mut self, node: NonNull<T>) -> T::Handle {
         // There are three possible cases:
         //
         // 1. `node` has two children.
@@ -704,7 +783,16 @@ where
                     // 3-child; otherwise, if the successor is not `right`, and its parent is unary,
                     // its parent becomes a 2-2 leaf; otherwise the rank rule holds.
                     successor_was_2_child
-                        .then_some(Violation::ThreeChild(successor, successor_right))
+                        .then(|| {
+                            // If the successor was not the removed node's right child, the
+                            // successor's right child becomes a 3-child of the successor's former
+                            // parent. Otherwise, the subtree rooted at the successor is elevated
+                            // intact.
+                            Violation::ThreeChild(
+                                successor_parent.unwrap_or(successor),
+                                successor_right,
+                            )
+                        })
                         .or_else(|| {
                             successor_parent
                                 .filter(|&p| T::links(p).as_ref().is_leaf())
@@ -932,6 +1020,10 @@ where
     }
 
     unsafe fn is_2_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
+        debug_assert!(unsafe {
+            T::links(parent).as_ref().left() == child || T::links(parent).as_ref().right() == child
+        });
+
         unsafe {
             match child {
                 Some(child) => {
@@ -943,6 +1035,10 @@ where
     }
 
     unsafe fn is_3_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
+        debug_assert!(unsafe {
+            T::links(parent).as_ref().left() == child || T::links(parent).as_ref().right() == child
+        });
+
         unsafe {
             match child {
                 Some(child) => {
@@ -1002,12 +1098,12 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    fn rank(&self) -> i8 {
+    pub fn rank(&self) -> i8 {
         unsafe { (*self.inner.get()).rank }
     }
 
     #[inline]
-    fn parent(&self) -> Link<T> {
+    pub fn parent(&self) -> Link<T> {
         unsafe { (*self.inner.get()).parent }
     }
 
@@ -1017,12 +1113,12 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    fn left(&self) -> Link<T> {
+    pub fn left(&self) -> Link<T> {
         self.child(Dir::Left)
     }
 
     #[inline]
-    fn right(&self) -> Link<T> {
+    pub fn right(&self) -> Link<T> {
         self.child(Dir::Right)
     }
 
