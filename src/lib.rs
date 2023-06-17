@@ -1,7 +1,7 @@
 //! An intrusive weak AVL tree, or WAVL tree.
 //!
-//! A WAVL tree is a self-balancing binary search tree. WAVL trees allow insertion, lookup and
-//! deletion in O(log<sub>2</sub>N) time with a constant number of tree rotations in the worst case.
+//! A WAVL tree is a self-balancing binary search tree allows insertion, lookup and deletion in
+//! O(log<sub>2</sub>N) time. Deletions require two tree rotations in the worst case.
 //!
 //! WAVL trees are described in the paper [Rank-Balanced Trees] by Haeupler, Sen and Tarjan.
 //!
@@ -19,27 +19,7 @@
 // 1. All rank differences are either 1 or 2.
 // 2. All leaves have rank 0.
 //
-// Corollaries:
-// 3. All ancestors of a leaf have rank at least one.
-//
-//    Proof:
-//    a. The parent of a leaf has rank 1 or 2 (by (1) and (2)).
-//    b. All ancestors of a node have a rank greater than it (by (1)).
-//    QED by (a) and (b)
-//
-// 4. All unary nodes are 1,2 with rank 1.
-//
-//    Proof:
-//
-//    Let `n` be a unary node.
-//    a. `n` has one missing child with rank -1.
-//    b. `r(n) ∈ {0, 1}` (by (1) and (a)).
-//
-//    Let `c` be `n`'s one child.
-//    c. `r(c) ≥ 0` (by (2) and (3)).
-//    c. `r(c) ∈ {-1, 0}` (by ())
-//    d. `n`'s one child `c` has
-//
+// `None` nodes are assigned a rank of -1
 use core::{
     borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
     pin::Pin, ptr::NonNull,
@@ -48,7 +28,7 @@ use std::collections::VecDeque;
 
 use cordyceps::Linked;
 
-pub use crate::iter::Iter;
+pub use crate::iter::{Iter, IterMut};
 
 mod iter;
 
@@ -946,6 +926,17 @@ where
     #[must_use]
     pub fn iter(&self) -> Iter<'_, T> {
         Iter::new(self)
+    }
+
+    /// Returns an iterator of mutable borrows over the items in the tree, sorted by key.
+    ///
+    /// # Safety
+    ///
+    /// It is the caller's responsibility to ensure that the `Links` of returned items are not
+    /// modified, as doing so can corrupt the tree, resulting in undefined behavior.
+    #[must_use]
+    pub unsafe fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut::new(self)
     }
 
     // Support methods ========================================================
