@@ -1,12 +1,14 @@
 //! An intrusive weak AVL tree, or WAVL tree.
 //!
-//! A WAVL tree is a self-balancing binary search tree allows insertion, lookup and deletion in
-//! O(log<sub>2</sub>N) time. Deletions require two tree rotations in the worst case.
+//! A WAVL tree is a self-balancing binary search tree which allows insertion and lookup in
+//! O(log<sub>2</sub>N) time. Deletion of a known node is O(1), requiring two tree rotations in the
+//! worst case.
 //!
 //! WAVL trees are described in the paper [Rank-Balanced Trees] by Haeupler, Sen and Tarjan.
 //!
 //! [Rank-Balanced Trees]: http://arks.princeton.edu/ark:/88435/pr1nz5z
-//#![no_std]
+
+#![no_std]
 
 // Conventions used in comments are from Hauepler, Sen and Tarjan:
 // - The rank of a node `x` is denoted `r(x)`.
@@ -19,29 +21,37 @@
 // 1. All rank differences are either 1 or 2.
 // 2. All leaves have rank 0.
 //
-// `None` nodes are assigned a rank of -1
+// `None` nodes are assigned a rank of -1.
 use core::{
-    borrow::Borrow, cell::UnsafeCell, cmp::Ordering, fmt, marker::PhantomPinned, mem, ops::Not,
+    borrow::Borrow, cell::UnsafeCell, cmp::Ordering, marker::PhantomPinned, mem, ops::Not,
     pin::Pin, ptr::NonNull,
 };
-use std::collections::VecDeque;
 
 use cordyceps::Linked;
 
 pub use crate::iter::{Iter, IterMut};
 
+#[cfg(feature = "alloc")]
+pub use crate::map::WavlMap;
+
+mod entry;
 mod iter;
+
+#[cfg(feature = "alloc")]
+pub mod map;
 
 #[cfg(test)]
 mod tests;
 
 pub trait TreeNode<L>: Linked<L> {
-    type Key: Ord + fmt::Debug;
+    type Key: Ord;
 
     fn key(&self) -> &Self::Key;
 }
 
 /// An intrusive weak AVL tree, or WAVL tree.
+///
+/// [WAVL tree]: https://en.wikipedia.org/wiki/WAVL_tree
 pub struct WavlTree<T>
 where
     T: TreeNode<Links<T>> + ?Sized,
@@ -155,70 +165,6 @@ where
         }
     }
 
-    pub fn dotgraph<'a, W, K>(&'a self, name: &str, mut w: W) -> fmt::Result
-    where
-        W: fmt::Write,
-        K: fmt::Display + From<&'a T::Key>,
-    {
-        let root = match self.root {
-            Some(r) => r,
-            None => return write!(w, "digraph \"graph-{name}\" {{}}"),
-        };
-
-        let mut queue = VecDeque::new();
-        queue.push_back(root);
-
-        write!(
-            w,
-            "digraph \"graph-{name}\" {{\n subgraph \"subgraph-{name}\" {{"
-        )?;
-
-        let mut links = String::new();
-        for _rank in 0.. {
-            use fmt::Write;
-            let remaining = queue.len();
-            if remaining == 0 {
-                break;
-            }
-
-            write!(w, "{{rank=same; ")?;
-
-            for _rank_node in 0..remaining {
-                let node = queue.pop_front().unwrap();
-
-                let key: K = unsafe { node.as_ref().key().into() };
-                let rank = unsafe { T::links(node).as_ref().rank() };
-                write!(w, "\"graph{name}-{key}\" [label=\"{key}:{rank}\"]; ")?;
-
-                if let Some(left) = unsafe { self.links(node).left() } {
-                    let child_key: K = unsafe { left.as_ref().key().into() };
-
-                    queue.push_back(left);
-                    writeln!(
-                        links,
-                        "\"graph{name}-{key}\" -> \"graph{name}-{child_key}\";"
-                    )?;
-                }
-
-                if let Some(right) = unsafe { self.links(node).right() } {
-                    let child_key: K = unsafe { right.as_ref().key().into() };
-
-                    queue.push_back(right);
-                    writeln!(
-                        links,
-                        "\"graph{name}-{key}\" -> \"graph{name}-{child_key}\";"
-                    )?;
-                }
-            }
-
-            writeln!(w, "}}")?;
-        }
-
-        w.write_str(&links)?;
-
-        w.write_str(" }\n}")
-    }
-
     /// Returns `true` if the tree contains an item with the specified key.
     #[inline]
     pub fn contains_key<Q>(&self, key: &Q) -> bool
@@ -230,17 +176,26 @@ where
     }
 
     /// Returns a reference to the node corresponding to `key`.
-    pub fn get<Q>(&self, key: &Q) -> Option<Pin<&T>>
+    pub fn get<Q>(&self, key: &Q) -> Option<&T>
     where
         T::Key: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
         let ptr = self.get_raw(key)?;
-        unsafe { Some(Pin::new_unchecked(ptr.as_ref())) }
+        unsafe { Some(ptr.as_ref()) }
     }
 
-    // TODO: un-pub me
-    pub fn get_raw<Q>(&self, key: &Q) -> Link<T>
+    /// Returns a pinned mutable reference to the node corresponding to `key`.
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<Pin<&mut T>>
+    where
+        T::Key: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        let mut ptr = self.get_raw(key)?;
+        unsafe { Some(Pin::new_unchecked(ptr.as_mut())) }
+    }
+
+    fn get_raw<Q>(&self, key: &Q) -> Link<T>
     where
         T::Key: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
@@ -260,10 +215,49 @@ where
         }
     }
 
+    // TODO: The entry API is difficult for an intrusive map as the key and value are packaged
+    // together, so the standard library approach of `tree.entry(key).insert(value)` doesn't work.
+    // An easy possibility is to look up the entry with a key and then write an entire node, but
+    // this either allows writing the wrong key in the node (unsafe) or requires the entry to hold a
+    // reference to the key used to look up the entry, thus requiring two copies of the key.
+    //
+    // Another possibility is to look up the entry using a node with an initialized key but an
+    // uninitialized value, and then write the value when `.insert()` is called. This avoids
+    // duplicating the key and prevents the insertion of the wrong key, but will require users to
+    // have a `MaybeUninit<V>` field in the node type, which in turn likely needs to be
+    // trait-accessible.
+    //
+    // pub fn entry<'key, Q>(&mut self, key: &'key Q) -> Entry<'_, 'key, T, Q>
+    // where
+    //     T::Key: Borrow<Q> + Ord,
+    //     Q: Ord + ?Sized,
+    // {
+    //     let Some(mut cur) = self.root else {
+    //         return unsafe { Entry::vacant_root(self, key) };
+    //     };
+    //
+    //     loop {
+    //         unsafe {
+    //             match key.cmp(cur.as_ref().key().borrow()) {
+    //                 Ordering::Less => match self.links(cur).left() {
+    //                     Some(item) => cur = item,
+    //                     None => return Entry::vacant_child(self, key, cur, Dir::Left),
+    //                 },
+    //
+    //                 Ordering::Greater => match self.links(cur).right() {
+    //                     Some(item) => cur = item,
+    //                     None => return Entry::vacant_child(self, key, cur, Dir::Right),
+    //                 },
+    //
+    //                 Ordering::Equal => return Entry::occupied(self, cur),
+    //             }
+    //         }
+    //     }
+    // }
+
     /// Returns the minimum element of the tree.
-    pub fn first(&self) -> Option<Pin<&T>> {
-        self.first_raw()
-            .map(|first| unsafe { Pin::new_unchecked(first.as_ref()) })
+    pub fn first(&self) -> Option<&T> {
+        self.first_raw().map(|first| unsafe { first.as_ref() })
     }
 
     fn first_raw(&self) -> Option<NonNull<T>> {
@@ -286,9 +280,8 @@ where
     }
 
     /// Returns the maximum element of the tree.
-    pub fn last(&self) -> Option<Pin<&T>> {
-        self.last_raw()
-            .map(|last| unsafe { Pin::new_unchecked(last.as_ref()) })
+    pub fn last(&self) -> Option<&T> {
+        self.last_raw().map(|last| unsafe { last.as_ref() })
     }
 
     fn last_raw(&self) -> Option<NonNull<T>> {
@@ -349,10 +342,10 @@ where
         new_child: Option<NonNull<T>>,
     ) {
         unsafe {
-            if T::links(parent).as_ref().child(Dir::Left) == Some(old_child) {
-                T::links(parent).as_mut().set_child(Dir::Left, new_child);
+            if self.links(parent).child(Dir::Left) == Some(old_child) {
+                self.links_mut(parent).set_child(Dir::Left, new_child);
             } else {
-                T::links(parent).as_mut().set_child(Dir::Right, new_child);
+                self.links_mut(parent).set_child(Dir::Right, new_child);
             }
         }
     }
@@ -374,32 +367,32 @@ where
         new_child: Option<NonNull<T>>,
     ) {
         unsafe {
-            if T::links(parent).as_ref().child(Dir::Left) == Some(old_child) {
+            if self.links(parent).child(Dir::Left) == Some(old_child) {
                 if let Some(new_child) = new_child {
                     assert_ne!(
-                        T::links(parent).as_ref().child(Dir::Right),
+                        self.links(parent).child(Dir::Right),
                         Some(new_child),
                         "`new_child` must not be a child of `parent`"
                     );
                 }
 
-                T::links(parent).as_mut().set_child(Dir::Left, new_child);
-            } else if T::links(parent).as_ref().child(Dir::Right) == Some(old_child) {
+                self.links_mut(parent).set_child(Dir::Left, new_child);
+            } else if self.links(parent).child(Dir::Right) == Some(old_child) {
                 if let Some(new_child) = new_child {
                     assert_ne!(
-                        T::links(parent).as_ref().child(Dir::Left),
+                        self.links(parent).child(Dir::Left),
                         Some(new_child),
                         "`new_child` must not be a child of `parent`"
                     );
                 }
 
-                T::links(parent).as_mut().set_child(Dir::Right, new_child);
+                self.links_mut(parent).set_child(Dir::Right, new_child);
             } else {
                 unreachable!("`old_child` must be a child of `parent`");
             }
 
             if let Some(new_child) = new_child {
-                T::links(new_child).as_mut().set_parent(Some(parent));
+                self.links_mut(new_child).set_parent(Some(parent));
             }
         }
     }
@@ -411,7 +404,7 @@ where
         unsafe {
             // - `down` becomes the `dir` child of `up`.
             // - `across` goes from the `dir` child of `up` to the `!dir` child of `down`.
-            let dir = if T::links(down).as_ref().right() == Some(up) {
+            let dir = if self.links(down).right() == Some(up) {
                 Dir::Left
             } else {
                 Dir::Right
@@ -419,13 +412,13 @@ where
 
             assert!(self.root.map(|r| r != up).unwrap_or(false));
 
-            let across = T::links(up).as_ref().child(dir);
-            T::links(down).as_mut().set_child(!dir, across);
+            let across = self.links(up).child(dir);
+            self.links_mut(down).set_child(!dir, across);
             self.maybe_set_parent(across, Some(down));
 
-            T::links(up).as_mut().set_child(dir, Some(down));
-            let parent = T::links(down).as_mut().set_parent(Some(up));
-            T::links(up).as_mut().set_parent(parent);
+            self.links_mut(up).set_child(dir, Some(down));
+            let parent = self.links_mut(down).set_parent(Some(up));
+            self.links_mut(up).set_parent(parent);
 
             match parent {
                 Some(parent) => self.replace_child(parent, down, Some(up)),
@@ -439,30 +432,30 @@ where
     // The ranks of affected nodes are not updated.
     fn rotate_twice_at(&mut self, down_second: NonNull<T>, down_first: NonNull<T>, up: NonNull<T>) {
         unsafe {
-            let dir = if T::links(down_first).as_ref().right() == Some(up) {
+            let dir = if self.links(down_first).right() == Some(up) {
                 Dir::Right
             } else {
                 Dir::Left
             };
 
-            let across_first = T::links(up).as_ref().child(!dir);
-            let across_second = T::links(up).as_ref().child(dir);
+            let across_first = self.links(up).child(!dir);
+            let across_second = self.links(up).child(dir);
 
             self.maybe_set_parent(across_first, Some(down_first));
 
-            T::links(down_first).as_mut().set_child(dir, across_first);
-            T::links(down_first).as_mut().set_parent(Some(up));
+            self.links_mut(down_first).set_child(dir, across_first);
+            self.links_mut(down_first).set_parent(Some(up));
 
             self.maybe_set_parent(across_second, Some(down_second));
 
             T::links(down_second)
                 .as_mut()
                 .set_child(!dir, across_second);
-            let parent = T::links(down_second).as_mut().set_parent(Some(up));
+            let parent = self.links_mut(down_second).set_parent(Some(up));
 
-            T::links(up).as_mut().set_parent(parent);
-            T::links(up).as_mut().set_child(!dir, Some(down_first));
-            T::links(up).as_mut().set_child(dir, Some(down_second));
+            self.links_mut(up).set_parent(parent);
+            self.links_mut(up).set_child(!dir, Some(down_first));
+            self.links_mut(up).set_child(dir, Some(down_second));
 
             match parent {
                 Some(parent) => self.replace_child(parent, down_second, Some(up)),
@@ -474,13 +467,12 @@ where
     fn sibling(&self, parent: NonNull<T>, node: Option<NonNull<T>>) -> Link<T> {
         unsafe {
             debug_assert!(
-                T::links(parent).as_ref().left().is_some()
-                    || T::links(parent).as_ref().right().is_some()
+                self.links(parent).left().is_some() || self.links(parent).right().is_some()
             );
-            if T::links(parent).as_ref().left() == node {
-                T::links(parent).as_ref().right()
+            if self.links(parent).left() == node {
+                self.links(parent).right()
             } else {
-                T::links(parent).as_ref().left()
+                self.links(parent).left()
             }
         }
     }
@@ -489,26 +481,31 @@ where
     ///
     /// This operation completes in O(log<sub>2</sub>N) time, with a constant number of rotations.
     pub fn insert(&mut self, item: T::Handle) -> Option<T::Handle> {
+        match self.root {
+            Some(root) => unsafe { self.insert_at(root, item) },
+            None => {
+                unsafe { self.insert_as_root(T::into_ptr(item)) };
+                None
+            }
+        }
+    }
+
+    unsafe fn insert_as_root(&mut self, item: NonNull<T>) {
+        debug_assert!(self.root.is_none());
+
+        unsafe {
+            self.links_mut(item).set_parent(None);
+            self.links_mut(item).set_left(None);
+            self.links_mut(item).set_right(None);
+        }
+
+        self.root = Some(item);
+        self.len += 1;
+    }
+
+    unsafe fn insert_at(&mut self, root: NonNull<T>, item: T::Handle) -> Option<T::Handle> {
         let ptr = T::into_ptr(item);
 
-        let root = match self.root {
-            Some(root) => root,
-            None => {
-                // Tree is empty. Set `item` as the root and return.
-                unsafe {
-                    let links = T::links(ptr).as_mut();
-                    links.set_parent(None);
-                    links.set_left(None);
-                    links.set_right(None);
-                }
-
-                self.root = Some(ptr);
-                self.len += 1;
-                return None;
-            }
-        };
-
-        let mut parent_was_leaf = false;
         let mut opt_cur = Some(root);
 
         // Descend the tree, looking for a suitable leaf.
@@ -517,54 +514,65 @@ where
 
             let dir = match ordering {
                 Ordering::Less => Dir::Left,
+                Ordering::Greater => Dir::Right,
 
                 Ordering::Equal => unsafe {
-                    let parent = T::links(cur).as_ref().parent();
-                    let left = T::links(cur).as_ref().left();
-                    let right = T::links(cur).as_ref().right();
+                    let parent = self.links(cur).parent();
+                    let left = self.links(cur).left();
+                    let right = self.links(cur).right();
 
                     self.replace_child_or_set_root(parent, cur, Some(ptr));
 
                     self.maybe_set_parent(left, Some(ptr));
                     self.maybe_set_parent(right, Some(ptr));
-                    let rank = T::links(cur).as_ref().rank();
+                    let rank = self.links(cur).rank();
 
-                    T::links(ptr).as_mut().set_rank(rank);
-                    T::links(ptr).as_mut().set_parent(parent);
-                    T::links(ptr).as_mut().set_left(left);
-                    T::links(ptr).as_mut().set_right(right);
+                    self.links_mut(ptr).set_rank(rank);
+                    self.links_mut(ptr).set_parent(parent);
+                    self.links_mut(ptr).set_left(left);
+                    self.links_mut(ptr).set_right(right);
 
-                    T::links(cur).as_mut().clear();
+                    self.links_mut(cur).clear();
                     return Some(T::from_ptr(cur));
                 },
-
-                Ordering::Greater => Dir::Right,
             };
 
             unsafe {
-                match T::links(cur).as_ref().child(dir) {
+                match self.links(cur).child(dir) {
                     // Descend.
                     Some(child) => opt_cur = Some(child),
 
                     // Set `item` as child.
                     None => {
-                        parent_was_leaf = self.is_leaf(cur);
-                        T::links(cur).as_mut().set_child(dir, Some(ptr));
-                        T::links(ptr).as_mut().set_parent(Some(cur));
-                        break;
+                        self.insert_as_child(cur, dir, ptr);
+                        return None;
                     }
                 }
             }
         }
 
-        if parent_was_leaf {
-            // The parent node is rank 0 and the newly inserted node is also rank 0, which violates
-            // the rank rule.
-            self.rebalance_inserted(ptr);
-        }
+        unreachable!()
+    }
 
-        self.len += 1;
-        None
+    // Inserts `item` as a child of `parent` in direction `dir`.
+    //
+    // Assumes `parent` does not already have a child in that direction.
+    unsafe fn insert_as_child(&mut self, parent: NonNull<T>, dir: Dir, item: NonNull<T>) {
+        unsafe {
+            debug_assert!(self.links(parent).child(dir).is_none());
+
+            let parent_was_leaf = self.is_leaf(parent);
+            self.links_mut(parent).set_child(dir, Some(item));
+            self.links_mut(item).set_parent(Some(parent));
+
+            if parent_was_leaf {
+                // The parent node is rank 0 and the newly inserted node is also rank 0, which
+                // violates the rank rule.
+                self.rebalance_inserted(item);
+            }
+
+            self.len += 1;
+        }
     }
 
     // Performs a bottom-up rebalance of the tree after the insertion of `node`.
@@ -574,8 +582,8 @@ where
     // - `node` is not the tree root.
     // - `node` has no children and is thus rank 0 and 1,1.
     // - `node`'s parent is 0,1.
-    fn rebalance_inserted(&mut self, node: NonNull<T>) {
-        debug_assert_eq!(unsafe { T::links(node).as_ref().rank() }, 0);
+    unsafe fn rebalance_inserted(&mut self, node: NonNull<T>) {
+        debug_assert_eq!(unsafe { self.links(node).rank() }, 0);
 
         let mut x = node;
         let mut parent = unsafe {
@@ -598,16 +606,16 @@ where
                 self.promote(parent);
 
                 // Ascend one level. If this reaches the root, break.
-                (parent, x) = match T::links(parent).as_mut().parent() {
+                (parent, x) = match self.links_mut(parent).parent() {
                     Some(p) => (p, parent),
                     None => break,
                 };
 
-                x_rank = T::links(x).as_ref().rank();
-                parent_rank = T::links(parent).as_ref().rank();
+                x_rank = self.links(x).rank();
+                parent_rank = self.links(parent).rank();
                 sibling_rank = self
                     .sibling(parent, Some(x))
-                    .map(|sib| T::links(sib).as_ref().rank())
+                    .map(|sib| self.links(sib).rank())
                     .unwrap_or(-1);
             }
         }
@@ -619,15 +627,15 @@ where
 
         let z = parent;
         unsafe {
-            let rotate_dir = if T::links(parent).as_ref().left() == Some(x) {
+            let rotate_dir = if self.links(parent).left() == Some(x) {
                 Dir::Right
             } else {
                 Dir::Left
             };
 
-            let y = T::links(x).as_ref().child(rotate_dir);
+            let y = self.links(x).child(rotate_dir);
             match y {
-                Some(y) if T::links(y).as_ref().rank() == x_rank - 2 => {
+                Some(y) if self.links(y).rank() == x_rank - 2 => {
                     self.rotate_at(parent, x);
                 }
 
@@ -636,7 +644,7 @@ where
                 }
 
                 Some(y) => {
-                    debug_assert_eq!(x_rank - T::links(y).as_ref().rank(), 1);
+                    debug_assert_eq!(x_rank - self.links(y).rank(), 1);
                     self.rotate_twice_at(z, x, y);
                     self.promote(y);
                     self.demote(x);
@@ -656,7 +664,7 @@ where
         let mut parent = None;
         let mut cur = root;
 
-        while let Some(left) = unsafe { T::links(cur).as_ref().left() } {
+        while let Some(left) = unsafe { self.links(cur).left() } {
             parent = Some(cur);
             cur = left;
         }
@@ -722,9 +730,9 @@ where
         let removed = node;
 
         unsafe {
-            let parent = T::links(node).as_ref().parent();
-            let left = T::links(node).as_ref().left();
-            let right = T::links(node).as_ref().right();
+            let parent = self.links(node).parent();
+            let left = self.links(node).left();
+            let right = self.links(node).right();
 
             enum Violation<T: ?Sized> {
                 None,
@@ -735,7 +743,7 @@ where
             let violation = match (left, right) {
                 (Some(left), Some(right)) => {
                     let (successor, successor_parent) = self.min_in_subtree(right);
-                    let successor_right = T::links(successor).as_ref().right();
+                    let successor_right = self.links(successor).right();
 
                     let successor_was_2_child =
                         self.is_2_child(successor_parent.unwrap_or(node), Some(successor));
@@ -743,21 +751,21 @@ where
                     if let Some(successor_parent) = successor_parent {
                         // Elevate the successor's right child to replace it.
                         self.replace_child(successor_parent, successor, successor_right);
-                        T::links(successor).as_mut().set_right(Some(right));
-                        T::links(right).as_mut().set_parent(Some(successor));
+                        self.links_mut(successor).set_right(Some(right));
+                        self.links_mut(right).set_parent(Some(successor));
                     }
 
                     self.replace_child_or_set_root(parent, node, Some(successor));
 
                     // Transfer rank of `node` to `successor`.
-                    let node_rank = T::links(node).as_ref().rank();
+                    let node_rank = self.links(node).rank();
 
-                    T::links(successor).as_mut().set_parent(parent);
-                    T::links(successor).as_mut().set_rank(node_rank);
-                    T::links(successor).as_mut().set_left(Some(left));
-                    // Right link is updated above iff succ != right.
+                    self.links_mut(successor).set_parent(parent);
+                    self.links_mut(successor).set_rank(node_rank);
+                    self.links_mut(successor).set_left(Some(left));
+                    // Right link is updated above iff `successor` != `right`.
 
-                    T::links(left).as_mut().set_parent(Some(successor));
+                    self.links_mut(left).set_parent(Some(successor));
 
                     // If the successor was a 2-child, its child (which may be None) becomes a
                     // 3-child; otherwise, if the successor is not `right`, and its parent is unary,
@@ -775,24 +783,22 @@ where
                         })
                         .or_else(|| {
                             successor_parent
-                                .filter(|&p| T::links(p).as_ref().is_leaf())
-                                .map(|sp| Violation::TwoTwoLeaf(T::links(sp).as_ref().parent(), sp))
+                                .filter(|&p| self.links(p).is_leaf())
+                                .map(|sp| Violation::TwoTwoLeaf(self.links(sp).parent(), sp))
                         })
                         .unwrap_or(Violation::None)
                 }
 
                 (Some(child), None) | (None, Some(child)) => {
                     self.replace_child_or_set_root(parent, node, Some(child));
-                    T::links(child).as_mut().set_parent(parent);
+                    self.links_mut(child).set_parent(parent);
 
                     // The removed node was unary. Thus the removed node was 1,2, and its child was
                     // a 1-child. If the removed node was a 2-child, its child becomes a 3-child;
                     // otherwise the rank rule holds.
 
                     parent
-                        .filter(|&p| {
-                            T::links(p).as_ref().rank() - T::links(node).as_ref().rank() == 2
-                        })
+                        .filter(|&p| self.links(p).rank() - T::links(node).as_ref().rank() == 2)
                         .map(|parent| Violation::ThreeChild(parent, Some(child)))
                         .unwrap_or(Violation::None)
                 }
@@ -805,9 +811,9 @@ where
                     // becomes a 3-child; otherwise the rank rule holds.
                     parent
                         .and_then(|p| {
-                            if T::links(p).as_ref().is_leaf() {
-                                Some(Violation::TwoTwoLeaf(T::links(p).as_ref().parent(), p))
-                            } else if T::links(p).as_ref().is_unary() {
+                            if self.links(p).is_leaf() {
+                                Some(Violation::TwoTwoLeaf(self.links(p).parent(), p))
+                            } else if self.links(p).is_unary() {
                                 Some(Violation::ThreeChild(p, None))
                             } else {
                                 None
@@ -853,7 +859,7 @@ where
                 break;
             }
 
-            let grandparent = match T::links(parent).as_ref().parent() {
+            let grandparent = match self.links(parent).parent() {
                 Some(p) => p,
                 None => break,
             };
@@ -872,10 +878,10 @@ where
 
         // Here we give up on descriptive names entirely and just use the names from the paper.
         let z = parent;
-        let w = T::links(y).as_ref().child(!dir);
+        let w = self.links(y).child(!dir);
 
         if self.is_2_child(y, w) {
-            let v = T::links(y).as_ref().child(dir).unwrap();
+            let v = self.links(y).child(dir).unwrap();
             self.rotate_twice_at(z, y, v);
             self.promote_twice(v);
             self.demote(y);
@@ -900,9 +906,9 @@ where
             unsafe {
                 // Descend to the minimum node.
                 let (cur, parent) = self.min_in_subtree(cur);
-                let parent = parent.or_else(|| T::links(cur).as_ref().parent());
+                let parent = parent.or_else(|| self.links(cur).parent());
 
-                let right = T::links(cur).as_ref().right();
+                let right = self.links(cur).right();
 
                 // Elevate the node's right child (which may be None).
                 self.replace_child_or_set_root(parent, cur, right);
@@ -917,9 +923,6 @@ where
                 opt_cur = right.or(parent);
             }
         }
-
-        //debug_assert!(self.root.is_none());
-        //debug_assert_eq!(self.len(), 0);
     }
 
     /// Returns an iterator over the items in the tree, sorted by key.

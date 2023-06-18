@@ -332,20 +332,20 @@ fn run_btree_equivalence(ops: Vec<Op>) {
     }
 
     #[inline]
+    #[allow(clippy::boxed_local)]
     fn node_key(node: Box<TestNode>) -> u32 {
         node.key
     }
 
     #[inline]
-    fn pin_key(pin: Pin<&TestNode>) -> Pin<&u32> {
-        unsafe { pin.map_unchecked(|node| &node.key) }
+    fn ref_key(node: &TestNode) -> &u32 {
+        &node.key
     }
 
     let mut final_ops = Vec::with_capacity(ops.len());
     for (op_id, op) in ops.into_iter().enumerate() {
         let final_op = op.finalize(&sorted_values);
         final_ops.push(final_op);
-        println!("final_op: {final_op:?}");
 
         match final_op {
             FinalOp::Insert(value) => {
@@ -364,9 +364,9 @@ fn run_btree_equivalence(ops: Vec<Op>) {
             // FinalOp::TryInsert(_) => todo!(),
             FinalOp::Get(value) => {
                 let from_btree = btree.get(&value);
-                let from_wavl = wavl.get(&value).map(pin_key);
+                let from_wavl = wavl.get(&value).map(ref_key);
 
-                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::Remove(value) => {
@@ -380,9 +380,9 @@ fn run_btree_equivalence(ops: Vec<Op>) {
 
             FinalOp::First => {
                 let from_btree = btree.first();
-                let from_wavl = wavl.first().map(pin_key);
+                let from_wavl = wavl.first().map(ref_key);
 
-                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::PopFirst => {
@@ -394,9 +394,9 @@ fn run_btree_equivalence(ops: Vec<Op>) {
 
             FinalOp::Last => {
                 let from_btree = btree.first();
-                let from_wavl = wavl.first().map(pin_key);
+                let from_wavl = wavl.first().map(ref_key);
 
-                assert_eq!(from_btree, from_wavl.as_deref(), "FinalOp #{op_id}: {op:?}");
+                assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
 
             FinalOp::PopLast => {
