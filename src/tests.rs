@@ -286,7 +286,6 @@ enum FinalOp {
 fn op_strategy() -> impl Strategy<Value = Op> {
     proptest::prop_oneof![
         value_strategy().prop_map(Op::Insert),
-        // value_strategy().prop_map(Op::TryInsert),
         value_strategy().prop_map(Op::Get),
         value_strategy().prop_map(Op::Remove),
         Just(Op::First),
