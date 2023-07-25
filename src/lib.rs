@@ -89,11 +89,80 @@ impl Not for Dir {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Rank(i8);
+
+impl Rank {
+    #[inline]
+    fn new(rank: i8) -> Rank {
+        Rank(rank)
+    }
+
+    #[must_use]
+    #[inline]
+    fn promote(self) -> Rank {
+        Rank(self.0.checked_add(1).unwrap())
+    }
+
+    #[must_use]
+    #[inline]
+    fn promote_twice(self) -> Rank {
+        Rank(self.0.checked_add(2).unwrap())
+    }
+
+    #[must_use]
+    #[inline]
+    fn demote(self) -> Rank {
+        Rank(self.0.checked_sub(1).unwrap())
+    }
+
+    #[must_use]
+    #[inline]
+    fn demote_twice(self) -> Rank {
+        Rank(self.0.checked_sub(2).unwrap())
+    }
+
+    #[inline]
+    fn like_0(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    fn like_1(self) -> bool {
+        self.0 == 1
+    }
+
+    #[inline]
+    fn like_2(self) -> bool {
+        self.0 == 2
+    }
+
+    #[inline]
+    fn difference_like_1(self, other: Rank) -> bool {
+        self.0.checked_sub(other.0).unwrap() == 1
+    }
+
+    #[inline]
+    fn difference_like_2(self, other: Rank) -> bool {
+        self.0.checked_sub(other.0).unwrap() == 2
+    }
+
+    #[inline]
+    fn difference_like_1_or_2(self, other: Rank) -> bool {
+        [1, 2].contains(&self.0.checked_sub(other.0).unwrap())
+    }
+
+    #[inline]
+    fn difference_like_3(self, other: Rank) -> bool {
+        self.0.checked_sub(other.0).unwrap() == 3
+    }
+}
+
 #[repr(C)]
 struct LinksInner<T: ?Sized> {
     parent: Link<T>,
     children: [Link<T>; 2],
-    rank: i8,
+    rank: Rank,
     _unpin: PhantomPinned,
 }
 
@@ -139,7 +208,7 @@ where
 
             // Ensure all leaves have rank 0.
             if self.is_leaf(node) {
-                assert_eq!(rank, 0);
+                assert!(rank.like_0());
             }
 
             for child in [Dir::Left, Dir::Right] {
@@ -147,8 +216,7 @@ where
                     let child_rank = self.links(child).rank();
 
                     // Ensure all rank differences are 1 or 2.
-                    let rank_diff = rank - child_rank;
-                    assert!([1, 2].contains(&rank_diff));
+                    assert!(rank.difference_like_1_or_2(child_rank));
 
                     // Ensure child's parent link points to this node.
                     let parent = self
@@ -159,7 +227,7 @@ where
 
                     self.assert_invariants_at(child);
                 } else {
-                    assert!(rank < 2);
+                    assert!(rank.0 < 2);
                 }
             }
         }
@@ -583,7 +651,7 @@ where
     // - `node` has no children and is thus rank 0 and 1,1.
     // - `node`'s parent is 0,1.
     unsafe fn rebalance_inserted(&mut self, node: NonNull<T>) {
-        debug_assert_eq!(unsafe { self.links(node).rank() }, 0);
+        debug_assert!(unsafe { self.links(node).rank().like_0() });
 
         let mut x = node;
         let mut parent = unsafe {
@@ -595,12 +663,12 @@ where
 
         debug_assert!(self.sibling(parent, Some(node)).is_none());
 
-        let mut x_rank = 0;
-        let mut parent_rank = 0;
-        let mut sibling_rank = -1;
+        let mut x_rank = Rank::new(0);
+        let mut parent_rank = Rank::new(0);
+        let mut sibling_rank = Rank::new(-1);
 
         // While `x` is not the tree root and its parent is 0,1, promote the parent and ascend.
-        while x_rank == parent_rank && x_rank == sibling_rank + 1 {
+        while x_rank == parent_rank && x_rank.difference_like_1(sibling_rank) {
             unsafe {
                 // Promote the parent.
                 self.promote(parent);
@@ -616,12 +684,12 @@ where
                 sibling_rank = self
                     .sibling(parent, Some(x))
                     .map(|sib| self.links(sib).rank())
-                    .unwrap_or(-1);
+                    .unwrap_or(Rank::new(-1));
             }
         }
 
         // If parent is not 0,2, the rank rule holds.
-        if x_rank != parent_rank || x_rank != sibling_rank + 2 {
+        if x_rank != parent_rank || !x_rank.difference_like_2(sibling_rank) {
             return;
         }
 
@@ -635,7 +703,7 @@ where
 
             let y = self.links(x).child(rotate_dir);
             match y {
-                Some(y) if self.links(y).rank() == x_rank - 2 => {
+                Some(y) if x_rank.difference_like_2(self.links(y).rank()) => {
                     self.rotate_at(parent, x);
                 }
 
@@ -644,7 +712,7 @@ where
                 }
 
                 Some(y) => {
-                    debug_assert_eq!(x_rank - self.links(y).rank(), 1);
+                    debug_assert!(x_rank.difference_like_1(self.links(y).rank()));
                     self.rotate_twice_at(z, x, y);
                     self.promote(y);
                     self.demote(x);
@@ -798,7 +866,10 @@ where
                     // otherwise the rank rule holds.
 
                     parent
-                        .filter(|&p| self.links(p).rank() - T::links(node).as_ref().rank() == 2)
+                        .filter(|&p| {
+                            let node_rank = T::links(node).as_ref().rank();
+                            self.links(p).rank().difference_like_2(node_rank)
+                        })
                         .map(|parent| Violation::ThreeChild(parent, Some(child)))
                         .unwrap_or(Violation::None)
                 }
@@ -966,7 +1037,7 @@ where
     unsafe fn promote(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.checked_add(1).unwrap();
+            inner.rank = inner.rank.promote();
         }
     }
 
@@ -974,7 +1045,7 @@ where
     unsafe fn promote_twice(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.checked_add(2).unwrap();
+            inner.rank = inner.rank.promote_twice();
         }
     }
 
@@ -982,7 +1053,7 @@ where
     unsafe fn demote(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.checked_sub(1).unwrap();
+            inner.rank = inner.rank.demote();
         }
     }
 
@@ -990,20 +1061,22 @@ where
     unsafe fn demote_twice(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.checked_sub(2).unwrap();
+            inner.rank = inner.rank.demote_twice();
         }
     }
 
     /// Returns the rank of the pointed-to node.
-    unsafe fn rank(&self, node: Option<NonNull<T>>) -> i8 {
-        node.map(|n| T::links(n).as_ref().rank()).unwrap_or(-1)
+    unsafe fn rank(&self, node: Option<NonNull<T>>) -> Rank {
+        node.map(|n| T::links(n).as_ref().rank())
+            .unwrap_or(Rank(-1))
     }
 
     unsafe fn is_2_2(&self, node: NonNull<T>) -> bool {
         unsafe {
+            let node_rank = T::links(node).as_ref().rank();
             let left_rank = self.rank(T::links(node).as_ref().left());
 
-            if left_rank != T::links(node).as_ref().rank() - 2 {
+            if !node_rank.difference_like_2(left_rank) {
                 return false;
             }
 
@@ -1019,11 +1092,15 @@ where
         });
 
         unsafe {
+            let parent_rank = T::links(parent).as_ref().rank();
+
             match child {
                 Some(child) => {
-                    T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 2
+                    let child_rank = T::links(child).as_ref().rank();
+                    parent_rank.difference_like_2(child_rank)
                 }
-                None => T::links(parent).as_ref().rank() == 1,
+
+                None => parent_rank.like_1(),
             }
         }
     }
@@ -1034,11 +1111,15 @@ where
         });
 
         unsafe {
+            let parent_rank = T::links(parent).as_ref().rank();
+
             match child {
                 Some(child) => {
-                    T::links(parent).as_ref().rank() == T::links(child).as_ref().rank() + 3
+                    let child_rank = T::links(child).as_ref().rank();
+                    parent_rank.difference_like_3(child_rank)
                 }
-                None => T::links(parent).as_ref().rank() == 2,
+
+                None => parent_rank.like_2(),
             }
         }
     }
@@ -1069,7 +1150,7 @@ impl<T: ?Sized> Links<T> {
             inner: UnsafeCell::new(LinksInner {
                 parent: None,
                 children: [None; 2],
-                rank: 0,
+                rank: Rank(0),
                 _unpin: PhantomPinned,
             }),
         }
@@ -1092,7 +1173,7 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    pub fn rank(&self) -> i8 {
+    pub fn rank(&self) -> Rank {
         unsafe { (*self.inner.get()).rank }
     }
 
@@ -1121,7 +1202,7 @@ impl<T: ?Sized> Links<T> {
         self.set_parent(None);
         self.set_left(None);
         self.set_right(None);
-        self.set_rank(0);
+        self.set_rank(Rank::new(0));
     }
 
     #[inline]
@@ -1145,7 +1226,7 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    fn set_rank(&mut self, rank: i8) {
+    fn set_rank(&mut self, rank: Rank) {
         self.inner.get_mut().rank = rank;
     }
 }
