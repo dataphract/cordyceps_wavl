@@ -39,6 +39,8 @@ mod iter;
 
 #[cfg(feature = "alloc")]
 pub mod map;
+#[cfg(any(feature = "std", test))]
+pub mod model;
 
 #[cfg(test)]
 mod tests;
