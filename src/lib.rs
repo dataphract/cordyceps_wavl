@@ -134,12 +134,15 @@ impl Rank {
 
     #[inline]
     fn like_0(self) -> bool {
-        self.0 % 2 == 0
-    }
+        #[cfg(debug_assertions)]
+        {
+            self.0 == 0
+        }
 
-    #[inline]
-    fn like_1(self) -> bool {
-        self.0 % 2 == 1
+        #[cfg(not(debug_assertions))]
+        {
+            self.0 % 2 == 0
+        }
     }
 
     #[inline]
@@ -148,23 +151,42 @@ impl Rank {
     }
 
     #[inline]
-    fn difference_like_1(self, other: Rank) -> bool {
-        self.0.checked_sub(other.0).unwrap() == 1
-    }
-
-    #[inline]
     fn difference_like_2(self, other: Rank) -> bool {
-        self.0.checked_sub(other.0).unwrap() == 2
+        #[cfg(debug_assertions)]
+        {
+            self.0.checked_sub(other.0).unwrap() == 2
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            self.parity() == other.parity()
+        }
     }
 
     #[inline]
     fn difference_like_1_or_2(self, other: Rank) -> bool {
-        [1, 2].contains(&self.0.checked_sub(other.0).unwrap())
+        #[cfg(debug_assertions)]
+        {
+            [1, 2].contains(&self.0.checked_sub(other.0).unwrap())
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            true
+        }
     }
 
     #[inline]
     fn difference_like_3(self, other: Rank) -> bool {
-        self.0.checked_sub(other.0).unwrap() == 3
+        #[cfg(debug_assertions)]
+        {
+            self.0.checked_sub(other.0).unwrap() == 3
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            self.parity() != other.parity()
+        }
     }
 }
 
@@ -226,8 +248,8 @@ where
                 if let Some(child) = self.links(node).child(child) {
                     let child_rank = self.links(child).rank();
 
-                    // Ensure all rank differences are 1 or 2.
-                    assert!(rank.difference_like_1_or_2(child_rank));
+                    // Ensure all rank differences are 1 or 2. Can only be checked in debug.
+                    debug_assert!(rank.difference_like_1_or_2(child_rank));
 
                     // Ensure child's parent link points to this node.
                     let parent = self
@@ -238,7 +260,8 @@ where
 
                     self.assert_invariants_at(child);
                 } else {
-                    assert!(rank.0 < 2);
+                    // Can only be checked in debug.
+                    debug_assert!(rank.0 < 2);
                 }
             }
         }
@@ -714,20 +737,19 @@ where
 
             let y = self.links(x).child(rotate_dir);
             match y {
-                // TODO: This can't be converted to a parity comparison.
-                Some(y) if x_rank.difference_like_2(self.links(y).rank()) => {
+                Some(y) if x_rank.parity() != self.links(y).rank().parity() => {
+                    self.rotate_twice_at(z, x, y);
+                    self.promote(y);
+                    self.demote(x);
+                }
+
+                Some(y) => {
+                    debug_assert!(x_rank.difference_like_2(self.links(y).rank()));
                     self.rotate_at(parent, x);
                 }
 
                 None => {
                     self.rotate_at(parent, x);
-                }
-
-                Some(y) => {
-                    debug_assert!(x_rank.difference_like_1(self.links(y).rank()));
-                    self.rotate_twice_at(z, x, y);
-                    self.promote(y);
-                    self.demote(x);
                 }
             }
 
@@ -825,8 +847,8 @@ where
                     let (successor, successor_parent) = self.min_in_subtree(right);
                     let successor_right = self.links(successor).right();
 
-                    let successor_was_2_child =
-                        self.is_2_child(successor_parent.unwrap_or(node), Some(successor));
+                    let successor_was_2_child = self.rank(successor_parent.or(Some(node))).parity()
+                        == self.rank(Some(successor)).parity();
 
                     if let Some(successor_parent) = successor_parent {
                         // Elevate the successor's right child to replace it.
@@ -881,7 +903,7 @@ where
                     };
 
                     let node_rank = T::links(node).as_ref().rank();
-                    if self.rank(Some(parent)).difference_like_2(node_rank) {
+                    if self.rank(Some(parent)).parity() == node_rank.parity() {
                         debug_assert!(self.is_3_child(parent, Some(child)));
                         Violation::ThreeChild(parent, Some(child))
                     } else {
@@ -948,9 +970,12 @@ where
         let mut x = child;
         let mut y = self.sibling(parent, x).unwrap();
 
-        while self.is_3_child(parent, x) {
+        // On the first iteration of the loop, `x` is known to be a 3-child; on subsequent
+        // iterations, `x` has just been demoted, making it either a 2-child or a 3-child of
+        // `parent`. Thus a parity comparison suffices to determine whether `x` is a 3-child.
+        while self.rank(Some(parent)).parity() != self.rank(x).parity() {
             debug_assert!(self.is_3_child(parent, x));
-            if self.is_2_child(parent, Some(y)) {
+            if self.rank(Some(parent)).parity() == self.rank(Some(y)).parity() {
                 self.demote(parent);
             } else if self.is_2_2(y) {
                 self.demote(y);
@@ -963,6 +988,7 @@ where
                 Some(p) => p,
                 None => break,
             };
+
             x = Some(parent);
             y = self
                 .sibling(grandparent, Some(parent))
@@ -970,7 +996,7 @@ where
             parent = grandparent
         }
 
-        if !self.is_3_child(parent, x) {
+        if self.rank(Some(parent)).parity() == self.rank(x).parity() {
             return;
         }
 
@@ -980,7 +1006,7 @@ where
         let z = parent;
         let w = self.links(y).child(!dir);
 
-        if self.is_2_child(y, w) {
+        if self.rank(Some(y)).parity() == self.rank(w).parity() {
             let v = self.links(y).child(dir).unwrap();
             self.rotate_twice_at(z, y, v);
             self.promote_twice(v);
@@ -1114,35 +1140,17 @@ where
             let node_rank = T::links(node).as_ref().rank();
             let left_rank = self.rank(T::links(node).as_ref().left());
 
-            if !node_rank.difference_like_2(left_rank) {
+            if node_rank.parity() != left_rank.parity() {
                 return false;
             }
 
             let right_rank = self.rank(T::links(node).as_ref().right());
 
-            left_rank == right_rank
+            left_rank.parity() == right_rank.parity()
         }
     }
 
-    unsafe fn is_2_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
-        debug_assert!(unsafe {
-            T::links(parent).as_ref().left() == child || T::links(parent).as_ref().right() == child
-        });
-
-        unsafe {
-            let parent_rank = T::links(parent).as_ref().rank();
-
-            match child {
-                Some(child) => {
-                    let child_rank = T::links(child).as_ref().rank();
-                    parent_rank.difference_like_2(child_rank)
-                }
-
-                None => parent_rank.like_1(),
-            }
-        }
-    }
-
+    // TODO: this should be a debug check only
     unsafe fn is_3_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
         debug_assert!(unsafe {
             T::links(parent).as_ref().left() == child || T::links(parent).as_ref().right() == child
@@ -1203,11 +1211,6 @@ impl<T: ?Sized> Links<T> {
     #[inline]
     fn is_leaf(&self) -> bool {
         self.left().is_none() && self.right().is_none()
-    }
-
-    #[inline]
-    fn is_unary(&self) -> bool {
-        self.left().is_some() != self.right().is_some()
     }
 
     #[inline]
