@@ -39,6 +39,9 @@ mod iter;
 
 #[cfg(feature = "alloc")]
 pub mod map;
+
+#[cfg(any(feature = "std", test))]
+pub mod debug;
 #[cfg(any(feature = "std", test))]
 pub mod model;
 
@@ -91,13 +94,18 @@ impl Not for Dir {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Rank(i8);
 
 impl Rank {
     #[inline]
     fn new(rank: i8) -> Rank {
         Rank(rank)
+    }
+
+    #[inline]
+    fn parity(self) -> bool {
+        self.0 % 2 != 0
     }
 
     #[must_use]
@@ -126,12 +134,12 @@ impl Rank {
 
     #[inline]
     fn like_0(self) -> bool {
-        self.0 == 0
+        self.0 % 2 == 0
     }
 
     #[inline]
     fn like_1(self) -> bool {
-        self.0 == 1
+        self.0 % 2 == 1
     }
 
     #[inline]
@@ -211,6 +219,7 @@ where
             // Ensure all leaves have rank 0.
             if self.is_leaf(node) {
                 assert!(rank.like_0());
+                return;
             }
 
             for child in [Dir::Left, Dir::Right] {
@@ -670,7 +679,7 @@ where
         let mut sibling_rank = Rank::new(-1);
 
         // While `x` is not the tree root and its parent is 0,1, promote the parent and ascend.
-        while x_rank == parent_rank && x_rank.difference_like_1(sibling_rank) {
+        while x_rank.parity() == parent_rank.parity() && x_rank.parity() != sibling_rank.parity() {
             unsafe {
                 // Promote the parent.
                 self.promote(parent);
@@ -691,7 +700,7 @@ where
         }
 
         // If parent is not 0,2, the rank rule holds.
-        if x_rank != parent_rank || !x_rank.difference_like_2(sibling_rank) {
+        if x_rank.parity() != parent_rank.parity() || x_rank.parity() != sibling_rank.parity() {
             return;
         }
 
@@ -705,6 +714,7 @@ where
 
             let y = self.links(x).child(rotate_dir);
             match y {
+                // TODO: This can't be converted to a parity comparison.
                 Some(y) if x_rank.difference_like_2(self.links(y).rank()) => {
                     self.rotate_at(parent, x);
                 }
@@ -842,14 +852,13 @@ where
                     // its parent becomes a 2-2 leaf; otherwise the rank rule holds.
                     successor_was_2_child
                         .then(|| {
+                            let parent = successor_parent.unwrap_or(successor);
+                            debug_assert!(self.is_3_child(parent, successor_right));
                             // If the successor was not the removed node's right child, the
                             // successor's right child becomes a 3-child of the successor's former
                             // parent. Otherwise, the subtree rooted at the successor is elevated
                             // intact.
-                            Violation::ThreeChild(
-                                successor_parent.unwrap_or(successor),
-                                successor_right,
-                            )
+                            Violation::ThreeChild(parent, successor_right)
                         })
                         .or_else(|| {
                             successor_parent
@@ -859,7 +868,7 @@ where
                         .unwrap_or(Violation::None)
                 }
 
-                (Some(child), None) | (None, Some(child)) => {
+                (Some(child), None) | (None, Some(child)) => 'unary: {
                     self.replace_child_or_set_root(parent, node, Some(child));
                     self.links_mut(child).set_parent(parent);
 
@@ -867,45 +876,61 @@ where
                     // a 1-child. If the removed node was a 2-child, its child becomes a 3-child;
                     // otherwise the rank rule holds.
 
-                    parent
-                        .filter(|&p| {
-                            let node_rank = T::links(node).as_ref().rank();
-                            self.links(p).rank().difference_like_2(node_rank)
-                        })
-                        .map(|parent| Violation::ThreeChild(parent, Some(child)))
-                        .unwrap_or(Violation::None)
+                    let Some(parent) = parent else {
+                        break 'unary Violation::None;
+                    };
+
+                    let node_rank = T::links(node).as_ref().rank();
+                    if self.rank(Some(parent)).difference_like_2(node_rank) {
+                        debug_assert!(self.is_3_child(parent, Some(child)));
+                        Violation::ThreeChild(parent, Some(child))
+                    } else {
+                        Violation::None
+                    }
                 }
 
-                (None, None) => {
+                (None, None) => 'leaf: {
+                    debug_assert!(self.rank(Some(node)).like_0());
+
                     self.replace_child_or_set_root(parent, node, None);
 
-                    // The removed node was a leaf and thus 1,1. If its parent was unary, the parent
-                    // becomes a 2,2 leaf; if it was a 2-child, the missing node that replaces it
-                    // becomes a 3-child; otherwise the rank rule holds.
-                    parent
-                        .and_then(|p| {
-                            if self.links(p).is_leaf() {
-                                Some(Violation::TwoTwoLeaf(self.links(p).parent(), p))
-                            } else if self.links(p).is_unary() {
-                                Some(Violation::ThreeChild(p, None))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(Violation::None)
+                    // The removed node was a leaf. If it had no parent, the tree is empty, so the
+                    // rank rule holds.
+                    let Some(parent) = parent else {
+                        break 'leaf Violation::None;
+                    };
+
+                    let grandparent = self.links(parent).parent();
+
+                    // If the removed node's parent was unary, the parent becomes a 2,2 leaf.
+                    if self.links(parent).is_leaf() {
+                        break 'leaf Violation::TwoTwoLeaf(grandparent, parent);
+                    }
+
+                    // The removed node's parent was binary. If it has rank 2, the new missing node
+                    // is a 3-child.
+                    if !self.parity(parent) {
+                        debug_assert_eq!(self.rank(Some(parent)), Rank::new(2));
+                        debug_assert!(self.is_3_child(parent, None));
+                        Violation::ThreeChild(parent, None)
+                    } else {
+                        Violation::None
+                    }
                 }
             };
 
             match violation {
                 Violation::None => (),
                 Violation::ThreeChild(parent, leaf) => {
+                    debug_assert!(self.is_3_child(parent, leaf),);
                     self.rebalance_3_child(parent, leaf);
                 }
                 Violation::TwoTwoLeaf(parent, leaf) => {
                     self.demote(leaf);
 
                     if let Some(parent) = parent {
-                        if self.is_3_child(parent, Some(leaf)) {
+                        if self.parity(parent) != self.parity(leaf) {
+                            debug_assert!(self.is_3_child(parent, Some(leaf)),);
                             self.rebalance_3_child(parent, Some(leaf));
                         }
                     }
@@ -919,10 +944,12 @@ where
     }
 
     unsafe fn rebalance_3_child(&mut self, mut parent: NonNull<T>, child: Option<NonNull<T>>) {
+        debug_assert!(self.is_3_child(parent, child),);
         let mut x = child;
         let mut y = self.sibling(parent, x).unwrap();
 
-        loop {
+        while self.is_3_child(parent, x) {
+            debug_assert!(self.is_3_child(parent, x));
             if self.is_2_child(parent, Some(y)) {
                 self.demote(parent);
             } else if self.is_2_2(y) {
@@ -965,6 +992,7 @@ where
 
             if self.is_leaf(z) {
                 self.demote_twice(z);
+                debug_assert!(self.rank(Some(z)).like_0());
             } else {
                 self.demote(z);
             }
@@ -1055,6 +1083,7 @@ where
     unsafe fn demote(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
+            debug_assert_ne!(inner.rank.0, 0);
             inner.rank = inner.rank.demote();
         }
     }
@@ -1063,6 +1092,8 @@ where
     unsafe fn demote_twice(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
+            debug_assert_ne!(inner.rank.0, 0);
+            debug_assert_ne!(inner.rank.0, 1);
             inner.rank = inner.rank.demote_twice();
         }
     }
@@ -1071,6 +1102,11 @@ where
     unsafe fn rank(&self, node: Option<NonNull<T>>) -> Rank {
         node.map(|n| T::links(n).as_ref().rank())
             .unwrap_or(Rank(-1))
+    }
+
+    /// Returns the rank parity of the pointed-to node.
+    unsafe fn parity(&self, node: NonNull<T>) -> bool {
+        T::links(node).as_ref().rank().0 % 2 != 0
     }
 
     unsafe fn is_2_2(&self, node: NonNull<T>) -> bool {

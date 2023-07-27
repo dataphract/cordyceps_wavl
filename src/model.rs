@@ -166,6 +166,7 @@ pub fn run_btree_equivalence(ops: Vec<Op>) {
         &node.key
     }
 
+    let mut s = String::new();
     let mut final_ops = Vec::with_capacity(ops.len());
     for (op_id, op) in ops.into_iter().enumerate() {
         let final_op = op.finalize(&sorted_values);
@@ -230,6 +231,10 @@ pub fn run_btree_equivalence(ops: Vec<Op>) {
                 assert_eq!(from_btree, from_wavl, "FinalOp #{op_id}: {op:?}");
             }
         }
+
+        // s.clear();
+        // wavl.dotgraph::<_, &u32>("wavl", &mut s).unwrap();
+        // std::println!("{s}");
 
         wavl.assert_invariants();
         assert_eq!(btree.len(), wavl.len());
