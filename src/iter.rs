@@ -13,12 +13,12 @@ enum CameFrom {
 /// An iterator over the items in a [`WavlTree`] in sorted order.
 ///
 /// This struct is created via [`WavlTree::iter`].
-pub struct Iter<'tree, T: TreeNode<Links<T>> + ?Sized> {
+pub struct Iter<'tree, T: TreeNode<Links<T>>> {
     inner: IterRaw<T>,
     phantom: PhantomData<&'tree WavlTree<T>>,
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iter<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> Iter<'tree, T> {
     pub(crate) fn new(tree: &'tree WavlTree<T>) -> Self {
         Iter {
             inner: IterRaw::new(tree),
@@ -27,12 +27,12 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iter<'tree, T> {
     }
 }
 
-pub struct IterMut<'tree, T: TreeNode<Links<T>> + ?Sized> {
+pub struct IterMut<'tree, T: TreeNode<Links<T>>> {
     inner: IterRaw<T>,
     phantom: PhantomData<&'tree mut WavlTree<T>>,
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> IterMut<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> IterMut<'tree, T> {
     pub(crate) fn new(tree: &'tree mut WavlTree<T>) -> Self {
         IterMut {
             inner: IterRaw::new_mut(tree),
@@ -41,7 +41,7 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> IterMut<'tree, T> {
     }
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iterator for Iter<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> Iterator for Iter<'tree, T> {
     type Item = &'tree T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -53,7 +53,7 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iterator for Iter<'tree, T> {
     }
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> DoubleEndedIterator for Iter<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> DoubleEndedIterator for Iter<'tree, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner
             .next_either(Dir::Right)
@@ -62,7 +62,7 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> DoubleEndedIterator for Iter<'tree, 
     }
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iterator for IterMut<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> Iterator for IterMut<'tree, T> {
     type Item = Pin<&'tree mut T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -73,7 +73,7 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> Iterator for IterMut<'tree, T> {
     }
 }
 
-impl<'tree, T: TreeNode<Links<T>> + ?Sized> DoubleEndedIterator for IterMut<'tree, T> {
+impl<'tree, T: TreeNode<Links<T>>> DoubleEndedIterator for IterMut<'tree, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner
             .next_either(Dir::Right)
@@ -82,7 +82,7 @@ impl<'tree, T: TreeNode<Links<T>> + ?Sized> DoubleEndedIterator for IterMut<'tre
     }
 }
 
-struct IterRaw<T: TreeNode<Links<T>> + ?Sized> {
+struct IterRaw<T: TreeNode<Links<T>>> {
     tree: NonNull<WavlTree<T>>,
 
     cur: [Link<T>; 2],
@@ -91,7 +91,7 @@ struct IterRaw<T: TreeNode<Links<T>> + ?Sized> {
     len: usize,
 }
 
-impl<T: TreeNode<Links<T>> + ?Sized> IterRaw<T> {
+impl<T: TreeNode<Links<T>>> IterRaw<T> {
     fn new(tree: &WavlTree<T>) -> Self {
         IterRaw {
             tree: tree.into(),

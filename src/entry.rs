@@ -7,9 +7,9 @@ use crate::{Dir, Links, TreeNode, WavlTree};
 /// A view into a single entry in a [`WavlTree`], which may be either vacant or occupied.
 pub enum Entry<'tree, 'key, T, Q>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
     T::Key: Borrow<Q> + Ord,
-    Q: Ord + ?Sized,
+    Q: Ord,
 {
     Vacant(VacantEntry<'tree, 'key, T, Q>),
     Occupied(OccupiedEntry<'tree, T>),
@@ -17,9 +17,9 @@ where
 
 impl<'tree, 'key, T, Q> Entry<'tree, 'key, T, Q>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
     T::Key: Borrow<Q> + Ord,
-    Q: Ord + ?Sized,
+    Q: Ord,
 {
     pub(crate) unsafe fn vacant_root(tree: &'tree mut WavlTree<T>, key: &'key Q) -> Self {
         Entry::Vacant(VacantEntry {
@@ -54,9 +54,9 @@ pub(crate) enum InsertAs<T: ?Sized> {
 
 pub struct VacantEntry<'tree, 'key, T, Q>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
     T::Key: Borrow<Q> + Ord,
-    Q: Ord + ?Sized,
+    Q: Ord,
 {
     pub(crate) tree: &'tree mut WavlTree<T>,
     pub(crate) key: &'key Q,
@@ -65,9 +65,9 @@ where
 
 impl<'tree, 'key, T, Q> VacantEntry<'tree, 'key, T, Q>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
     T::Key: Borrow<Q> + Ord,
-    Q: Ord + ?Sized,
+    Q: Ord,
 {
     /// Inserts `item` at the key associated with this entry.
     ///
@@ -91,7 +91,7 @@ where
 
 pub struct OccupiedEntry<'tree, T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     pub(crate) tree: &'tree mut WavlTree<T>,
     pub(crate) node: NonNull<T>,
@@ -99,7 +99,7 @@ where
 
 impl<'tree, T> OccupiedEntry<'tree, T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     /// Returns a reference to the item in the entry.
     pub fn get(&self) -> &'tree T {
@@ -134,7 +134,7 @@ where
         unsafe {
             // Read the old value's links.
             let old_links = self.tree.links(old_ptr);
-            let rank = old_links.rank();
+            let parity = old_links.parity();
             let parent = old_links.parent();
             let left = old_links.left();
             let right = old_links.right();
@@ -156,7 +156,7 @@ where
             self.tree.links_mut(new_ptr).set_parent(parent);
             self.tree.links_mut(new_ptr).set_left(left);
             self.tree.links_mut(new_ptr).set_right(right);
-            self.tree.links_mut(new_ptr).set_rank(rank);
+            self.tree.links_mut(new_ptr).set_parity(parity);
 
             // Deinit the old item's links.
             self.tree.links_mut(old_ptr).clear();

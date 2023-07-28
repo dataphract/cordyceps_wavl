@@ -7,7 +7,7 @@ use crate::{Links, TreeNode, WavlTree};
 
 impl<T> WavlTree<T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     pub fn dotgraph<'a, W, K>(&'a self, name: &str, mut w: W) -> fmt::Result
     where
@@ -19,7 +19,7 @@ where
             None => return write!(w, "digraph \"graph-{name}\" {{}}"),
         };
 
-        enum Item<T: TreeNode<Links<T>> + ?Sized> {
+        enum Item<T: TreeNode<Links<T>>> {
             Node(NonNull<T>),
             Missing(u32),
         }
@@ -56,8 +56,8 @@ where
                 };
 
                 let key: K = unsafe { node.as_ref().key().into() };
-                let rank = unsafe { T::links(node).as_ref().rank() };
-                write!(w, "\"graph{name}-{key}\" [label=\"{key}:{rank:?}\"]; ")?;
+                let parity = unsafe { T::links(node).as_ref().parity() } as usize;
+                write!(w, "\"graph{name}-{key}\" [label=\"{key}:{parity:?}\"]; ")?;
 
                 if let Some(left) = unsafe { self.links(node).left() } {
                     let child_key: K = unsafe { left.as_ref().key().into() };

@@ -9,6 +9,7 @@
 //! [Rank-Balanced Trees]: http://arks.princeton.edu/ark:/88435/pr1nz5z
 
 #![no_std]
+#![allow(unstable_name_collisions)]
 
 // Conventions used in comments are from Hauepler, Sen and Tarjan:
 // - The rank of a node `x` is denoted `r(x)`.
@@ -29,6 +30,8 @@ use core::{
 
 use cordyceps::Linked;
 
+use crate::rank::RankPtr;
+
 pub use crate::iter::{Iter, IterMut};
 
 #[cfg(feature = "alloc")]
@@ -36,6 +39,7 @@ pub use crate::map::WavlMap;
 
 mod entry;
 mod iter;
+mod rank;
 
 #[cfg(feature = "alloc")]
 pub mod map;
@@ -59,7 +63,7 @@ pub trait TreeNode<L>: Linked<L> {
 /// [WAVL tree]: https://en.wikipedia.org/wiki/WAVL_tree
 pub struct WavlTree<T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     root: Link<T>,
     len: usize,
@@ -70,7 +74,7 @@ where
 /// In order to be part of a [`WavlTree`], a type must contain a value of this type, and must
 /// implement the [`TreeNode`] trait for [`Links<Self>`].
 #[derive(Debug)]
-pub struct Links<T: ?Sized> {
+pub struct Links<T> {
     inner: UnsafeCell<LinksInner<T>>,
 }
 
@@ -94,107 +98,10 @@ impl Not for Dir {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Rank(i8);
-
-impl Rank {
-    #[inline]
-    fn new(rank: i8) -> Rank {
-        Rank(rank)
-    }
-
-    #[inline]
-    fn parity(self) -> bool {
-        self.0 % 2 != 0
-    }
-
-    #[must_use]
-    #[inline]
-    fn promote(self) -> Rank {
-        Rank(self.0.checked_add(1).unwrap())
-    }
-
-    #[must_use]
-    #[inline]
-    fn promote_twice(self) -> Rank {
-        Rank(self.0.checked_add(2).unwrap())
-    }
-
-    #[must_use]
-    #[inline]
-    fn demote(self) -> Rank {
-        Rank(self.0.checked_sub(1).unwrap())
-    }
-
-    #[must_use]
-    #[inline]
-    fn demote_twice(self) -> Rank {
-        Rank(self.0.checked_sub(2).unwrap())
-    }
-
-    #[inline]
-    fn like_0(self) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.0 == 0
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            self.0 % 2 == 0
-        }
-    }
-
-    #[inline]
-    fn like_2(self) -> bool {
-        self.0 == 2
-    }
-
-    #[inline]
-    fn difference_like_2(self, other: Rank) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.0.checked_sub(other.0).unwrap() == 2
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            self.parity() == other.parity()
-        }
-    }
-
-    #[inline]
-    fn difference_like_1_or_2(self, other: Rank) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            [1, 2].contains(&self.0.checked_sub(other.0).unwrap())
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            true
-        }
-    }
-
-    #[inline]
-    fn difference_like_3(self, other: Rank) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.0.checked_sub(other.0).unwrap() == 3
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            self.parity() != other.parity()
-        }
-    }
-}
-
 #[repr(C)]
-struct LinksInner<T: ?Sized> {
-    parent: Link<T>,
+struct LinksInner<T> {
+    parent_and_rank: RankPtr<T>,
     children: [Link<T>; 2],
-    rank: Rank,
     _unpin: PhantomPinned,
 }
 
@@ -202,7 +109,7 @@ type Link<T> = Option<NonNull<T>>;
 
 impl<T> WavlTree<T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     /// Returns a new empty tree.
     pub const fn new() -> WavlTree<T> {
@@ -236,21 +143,16 @@ where
     #[allow(clippy::only_used_in_recursion)]
     unsafe fn assert_invariants_at(&self, node: NonNull<T>) {
         unsafe {
-            let rank = self.links(node).rank();
+            let parity = self.links(node).parity();
 
             // Ensure all leaves have rank 0.
             if self.is_leaf(node) {
-                assert!(rank.like_0());
+                assert!(!parity);
                 return;
             }
 
             for child in [Dir::Left, Dir::Right] {
                 if let Some(child) = self.links(node).child(child) {
-                    let child_rank = self.links(child).rank();
-
-                    // Ensure all rank differences are 1 or 2. Can only be checked in debug.
-                    debug_assert!(rank.difference_like_1_or_2(child_rank));
-
                     // Ensure child's parent link points to this node.
                     let parent = self
                         .links(child)
@@ -259,9 +161,6 @@ where
                     assert_eq!(node, parent);
 
                     self.assert_invariants_at(child);
-                } else {
-                    // Can only be checked in debug.
-                    debug_assert!(rank.0 < 2);
                 }
             }
         }
@@ -272,7 +171,7 @@ where
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         T::Key: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.get(key).is_some()
     }
@@ -281,7 +180,7 @@ where
     pub fn get<Q>(&self, key: &Q) -> Option<&T>
     where
         T::Key: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         let ptr = self.get_raw(key)?;
         unsafe { Some(ptr.as_ref()) }
@@ -291,7 +190,7 @@ where
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<Pin<&mut T>>
     where
         T::Key: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         let mut ptr = self.get_raw(key)?;
         unsafe { Some(Pin::new_unchecked(ptr.as_mut())) }
@@ -300,7 +199,7 @@ where
     fn get_raw<Q>(&self, key: &Q) -> Link<T>
     where
         T::Key: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         let mut opt_cur = self.root;
 
@@ -332,7 +231,7 @@ where
     // pub fn entry<'key, Q>(&mut self, key: &'key Q) -> Entry<'_, 'key, T, Q>
     // where
     //     T::Key: Borrow<Q> + Ord,
-    //     Q: Ord + ?Sized,
+    //     Q: Ord ,
     // {
     //     let Some(mut cur) = self.root else {
     //         return unsafe { Entry::vacant_root(self, key) };
@@ -627,9 +526,9 @@ where
 
                     self.maybe_set_parent(left, Some(ptr));
                     self.maybe_set_parent(right, Some(ptr));
-                    let rank = self.links(cur).rank();
+                    let parity = self.parity(cur);
 
-                    self.links_mut(ptr).set_rank(rank);
+                    self.links_mut(ptr).set_parity(parity);
                     self.links_mut(ptr).set_parent(parent);
                     self.links_mut(ptr).set_left(left);
                     self.links_mut(ptr).set_right(right);
@@ -685,7 +584,7 @@ where
     // - `node` has no children and is thus rank 0 and 1,1.
     // - `node`'s parent is 0,1.
     unsafe fn rebalance_inserted(&mut self, node: NonNull<T>) {
-        debug_assert!(unsafe { self.links(node).rank().like_0() });
+        debug_assert!(unsafe { !self.parity(node) });
 
         let mut x = node;
         let mut parent = unsafe {
@@ -697,12 +596,12 @@ where
 
         debug_assert!(self.sibling(parent, Some(node)).is_none());
 
-        let mut x_rank = Rank::new(0);
-        let mut parent_rank = Rank::new(0);
-        let mut sibling_rank = Rank::new(-1);
+        let mut x_parity = false;
+        let mut parent_parity = false;
+        let mut sibling_parity = true;
 
         // While `x` is not the tree root and its parent is 0,1, promote the parent and ascend.
-        while x_rank.parity() == parent_rank.parity() && x_rank.parity() != sibling_rank.parity() {
+        while x_parity == parent_parity && x_parity != sibling_parity {
             unsafe {
                 // Promote the parent.
                 self.promote(parent);
@@ -713,17 +612,14 @@ where
                     None => break,
                 };
 
-                x_rank = self.links(x).rank();
-                parent_rank = self.links(parent).rank();
-                sibling_rank = self
-                    .sibling(parent, Some(x))
-                    .map(|sib| self.links(sib).rank())
-                    .unwrap_or(Rank::new(-1));
+                x_parity = self.parity(x);
+                parent_parity = self.parity(parent);
+                sibling_parity = self.opt_parity(self.sibling(parent, Some(x)));
             }
         }
 
         // If parent is not 0,2, the rank rule holds.
-        if x_rank.parity() != parent_rank.parity() || x_rank.parity() != sibling_rank.parity() {
+        if x_parity != parent_parity || x_parity != sibling_parity {
             return;
         }
 
@@ -737,18 +633,13 @@ where
 
             let y = self.links(x).child(rotate_dir);
             match y {
-                Some(y) if x_rank.parity() != self.links(y).rank().parity() => {
+                Some(y) if x_parity != self.parity(y) => {
                     self.rotate_twice_at(z, x, y);
                     self.promote(y);
                     self.demote(x);
                 }
 
-                Some(y) => {
-                    debug_assert!(x_rank.difference_like_2(self.links(y).rank()));
-                    self.rotate_at(parent, x);
-                }
-
-                None => {
+                Some(_) | None => {
                     self.rotate_at(parent, x);
                 }
             }
@@ -780,7 +671,7 @@ where
     pub fn remove<Q>(&mut self, key: &Q) -> Option<T::Handle>
     where
         T::Key: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.get_raw(key)
             .map(|node| unsafe { self.remove_at(node) })
@@ -836,7 +727,7 @@ where
             let left = self.links(node).left();
             let right = self.links(node).right();
 
-            enum Violation<T: ?Sized> {
+            enum Violation<T> {
                 None,
                 ThreeChild(NonNull<T>, Option<NonNull<T>>),
                 TwoTwoLeaf(Option<NonNull<T>>, NonNull<T>),
@@ -847,8 +738,8 @@ where
                     let (successor, successor_parent) = self.min_in_subtree(right);
                     let successor_right = self.links(successor).right();
 
-                    let successor_was_2_child = self.rank(successor_parent.or(Some(node))).parity()
-                        == self.rank(Some(successor)).parity();
+                    let successor_was_2_child =
+                        self.parity(successor_parent.unwrap_or(node)) == self.parity(successor);
 
                     if let Some(successor_parent) = successor_parent {
                         // Elevate the successor's right child to replace it.
@@ -860,10 +751,10 @@ where
                     self.replace_child_or_set_root(parent, node, Some(successor));
 
                     // Transfer rank of `node` to `successor`.
-                    let node_rank = self.links(node).rank();
+                    let node_parity = self.links(node).parity();
 
                     self.links_mut(successor).set_parent(parent);
-                    self.links_mut(successor).set_rank(node_rank);
+                    self.links_mut(successor).set_parity(node_parity);
                     self.links_mut(successor).set_left(Some(left));
                     // Right link is updated above iff `successor` != `right`.
 
@@ -875,7 +766,6 @@ where
                     successor_was_2_child
                         .then(|| {
                             let parent = successor_parent.unwrap_or(successor);
-                            debug_assert!(self.is_3_child(parent, successor_right));
                             // If the successor was not the removed node's right child, the
                             // successor's right child becomes a 3-child of the successor's former
                             // parent. Otherwise, the subtree rooted at the successor is elevated
@@ -902,9 +792,7 @@ where
                         break 'unary Violation::None;
                     };
 
-                    let node_rank = T::links(node).as_ref().rank();
-                    if self.rank(Some(parent)).parity() == node_rank.parity() {
-                        debug_assert!(self.is_3_child(parent, Some(child)));
+                    if self.parity(parent) == self.parity(node) {
                         Violation::ThreeChild(parent, Some(child))
                     } else {
                         Violation::None
@@ -912,8 +800,6 @@ where
                 }
 
                 (None, None) => 'leaf: {
-                    debug_assert!(self.rank(Some(node)).like_0());
-
                     self.replace_child_or_set_root(parent, node, None);
 
                     // The removed node was a leaf. If it had no parent, the tree is empty, so the
@@ -932,8 +818,6 @@ where
                     // The removed node's parent was binary. If it has rank 2, the new missing node
                     // is a 3-child.
                     if !self.parity(parent) {
-                        debug_assert_eq!(self.rank(Some(parent)), Rank::new(2));
-                        debug_assert!(self.is_3_child(parent, None));
                         Violation::ThreeChild(parent, None)
                     } else {
                         Violation::None
@@ -944,7 +828,6 @@ where
             match violation {
                 Violation::None => (),
                 Violation::ThreeChild(parent, leaf) => {
-                    debug_assert!(self.is_3_child(parent, leaf),);
                     self.rebalance_3_child(parent, leaf);
                 }
                 Violation::TwoTwoLeaf(parent, leaf) => {
@@ -952,7 +835,6 @@ where
 
                     if let Some(parent) = parent {
                         if self.parity(parent) != self.parity(leaf) {
-                            debug_assert!(self.is_3_child(parent, Some(leaf)),);
                             self.rebalance_3_child(parent, Some(leaf));
                         }
                     }
@@ -966,16 +848,14 @@ where
     }
 
     unsafe fn rebalance_3_child(&mut self, mut parent: NonNull<T>, child: Option<NonNull<T>>) {
-        debug_assert!(self.is_3_child(parent, child),);
         let mut x = child;
         let mut y = self.sibling(parent, x).unwrap();
 
         // On the first iteration of the loop, `x` is known to be a 3-child; on subsequent
         // iterations, `x` has just been demoted, making it either a 2-child or a 3-child of
         // `parent`. Thus a parity comparison suffices to determine whether `x` is a 3-child.
-        while self.rank(Some(parent)).parity() != self.rank(x).parity() {
-            debug_assert!(self.is_3_child(parent, x));
-            if self.rank(Some(parent)).parity() == self.rank(Some(y)).parity() {
+        while self.parity(parent) != self.opt_parity(x) {
+            if self.parity(parent) == self.parity(y) {
                 self.demote(parent);
             } else if self.is_2_2(y) {
                 self.demote(y);
@@ -996,7 +876,7 @@ where
             parent = grandparent
         }
 
-        if self.rank(Some(parent)).parity() == self.rank(x).parity() {
+        if self.parity(parent) == self.opt_parity(x) {
             return;
         }
 
@@ -1006,7 +886,7 @@ where
         let z = parent;
         let w = self.links(y).child(!dir);
 
-        if self.rank(Some(y)).parity() == self.rank(w).parity() {
+        if self.parity(y) == self.opt_parity(w) {
             let v = self.links(y).child(dir).unwrap();
             self.rotate_twice_at(z, y, v);
             self.promote_twice(v);
@@ -1018,7 +898,6 @@ where
 
             if self.is_leaf(z) {
                 self.demote_twice(z);
-                debug_assert!(self.rank(Some(z)).like_0());
             } else {
                 self.demote(z);
             }
@@ -1093,7 +972,7 @@ where
     unsafe fn promote(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.promote();
+            inner.parent_and_rank.promote();
         }
     }
 
@@ -1101,7 +980,7 @@ where
     unsafe fn promote_twice(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            inner.rank = inner.rank.promote_twice();
+            inner.parent_and_rank.promote_twice();
         }
     }
 
@@ -1109,8 +988,7 @@ where
     unsafe fn demote(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            debug_assert_ne!(inner.rank.0, 0);
-            inner.rank = inner.rank.demote();
+            inner.parent_and_rank.demote();
         }
     }
 
@@ -1118,55 +996,28 @@ where
     unsafe fn demote_twice(&mut self, node: NonNull<T>) {
         unsafe {
             let inner = T::links(node).as_mut().inner.get_mut();
-            debug_assert_ne!(inner.rank.0, 0);
-            debug_assert_ne!(inner.rank.0, 1);
-            inner.rank = inner.rank.demote_twice();
+            inner.parent_and_rank.demote_twice();
         }
-    }
-
-    /// Returns the rank of the pointed-to node.
-    unsafe fn rank(&self, node: Option<NonNull<T>>) -> Rank {
-        node.map(|n| T::links(n).as_ref().rank())
-            .unwrap_or(Rank(-1))
     }
 
     /// Returns the rank parity of the pointed-to node.
     unsafe fn parity(&self, node: NonNull<T>) -> bool {
-        T::links(node).as_ref().rank().0 % 2 != 0
+        T::links(node).as_ref().parity()
+    }
+
+    unsafe fn opt_parity(&self, node: Link<T>) -> bool {
+        node.map(|n| self.parity(n)).unwrap_or(true)
     }
 
     unsafe fn is_2_2(&self, node: NonNull<T>) -> bool {
         unsafe {
-            let node_rank = T::links(node).as_ref().rank();
-            let left_rank = self.rank(T::links(node).as_ref().left());
+            let node = T::links(node).as_ref();
 
-            if node_rank.parity() != left_rank.parity() {
+            if node.parity() != self.opt_parity(node.left()) {
                 return false;
             }
 
-            let right_rank = self.rank(T::links(node).as_ref().right());
-
-            left_rank.parity() == right_rank.parity()
-        }
-    }
-
-    // TODO: this should be a debug check only
-    unsafe fn is_3_child(&self, parent: NonNull<T>, child: Option<NonNull<T>>) -> bool {
-        debug_assert!(unsafe {
-            T::links(parent).as_ref().left() == child || T::links(parent).as_ref().right() == child
-        });
-
-        unsafe {
-            let parent_rank = T::links(parent).as_ref().rank();
-
-            match child {
-                Some(child) => {
-                    let child_rank = T::links(child).as_ref().rank();
-                    parent_rank.difference_like_3(child_rank)
-                }
-
-                None => parent_rank.like_2(),
-            }
+            node.parity() == self.opt_parity(node.right())
         }
     }
 
@@ -1181,22 +1032,21 @@ where
 
 impl<T> Drop for WavlTree<T>
 where
-    T: TreeNode<Links<T>> + ?Sized,
+    T: TreeNode<Links<T>>,
 {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
-impl<T: ?Sized> Links<T> {
+impl<T> Links<T> {
     /// Returns new links for a [`WavlTree`].
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: UnsafeCell::new(LinksInner {
-                parent: None,
+                parent_and_rank: RankPtr::new(None, false),
                 children: [None; 2],
-                rank: Rank(0),
                 _unpin: PhantomPinned,
             }),
         }
@@ -1205,7 +1055,9 @@ impl<T: ?Sized> Links<T> {
     /// Returns `true` if this node is currently linked into a [`WavlTree`].
     pub fn is_linked(&self) -> bool {
         let inner = unsafe { &*self.inner.get() };
-        inner.parent.is_some() || inner.children[0].is_some() || inner.children[1].is_some()
+        inner.parent_and_rank.ptr().is_some()
+            || inner.children[0].is_some()
+            || inner.children[1].is_some()
     }
 
     #[inline]
@@ -1214,13 +1066,13 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    pub fn rank(&self) -> Rank {
-        unsafe { (*self.inner.get()).rank }
+    pub fn parity(&self) -> bool {
+        unsafe { (*self.inner.get()).parent_and_rank.parity() }
     }
 
     #[inline]
     pub fn parent(&self) -> Link<T> {
-        unsafe { (*self.inner.get()).parent }
+        unsafe { (*self.inner.get()).parent_and_rank.ptr() }
     }
 
     #[inline]
@@ -1243,12 +1095,15 @@ impl<T: ?Sized> Links<T> {
         self.set_parent(None);
         self.set_left(None);
         self.set_right(None);
-        self.set_rank(Rank::new(0));
+        self.set_parity(false);
     }
 
     #[inline]
     fn set_parent(&mut self, parent: Link<T>) -> Link<T> {
-        mem::replace(&mut self.inner.get_mut().parent, parent)
+        let inner = self.inner.get_mut();
+        let old_parent = inner.parent_and_rank.ptr();
+        inner.parent_and_rank.set_ptr(parent);
+        old_parent
     }
 
     #[inline]
@@ -1267,7 +1122,7 @@ impl<T: ?Sized> Links<T> {
     }
 
     #[inline]
-    fn set_rank(&mut self, rank: Rank) {
-        self.inner.get_mut().rank = rank;
+    fn set_parity(&mut self, parity: bool) {
+        self.inner.get_mut().parent_and_rank.set_parity(parity);
     }
 }
