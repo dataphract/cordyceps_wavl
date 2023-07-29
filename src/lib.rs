@@ -46,7 +46,8 @@ pub mod map;
 
 #[cfg(any(feature = "std", test))]
 pub mod debug;
-#[cfg(any(feature = "std", test))]
+
+#[cfg(any(feature = "model", test))]
 pub mod model;
 
 #[cfg(test)]

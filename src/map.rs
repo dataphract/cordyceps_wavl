@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::{borrow::Borrow, marker::PhantomPinned, ptr::NonNull};
 
 use cordyceps::Linked;
@@ -66,7 +69,7 @@ impl<K: Ord, V> WavlMap<K, V> {
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.tree.contains_key(key)
     }
@@ -76,7 +79,7 @@ impl<K: Ord, V> WavlMap<K, V> {
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.tree.get(key).map(|node| &node.value)
     }
@@ -86,7 +89,7 @@ impl<K: Ord, V> WavlMap<K, V> {
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.tree
             .get_mut(key)
@@ -137,7 +140,7 @@ impl<K: Ord, V> WavlMap<K, V> {
     pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q> + Ord,
-        Q: Ord + ?Sized,
+        Q: Ord,
     {
         self.tree.remove(key).map(|node| node.value)
     }
