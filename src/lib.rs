@@ -63,6 +63,8 @@ where
     T: TreeNode<Links<T>> + ?Sized,
 {
     root: Link<T>,
+    first: Link<T>,
+    last: Link<T>,
     len: usize,
 }
 
@@ -207,7 +209,12 @@ where
 {
     /// Returns a new empty tree.
     pub const fn new() -> WavlTree<T> {
-        WavlTree { root: None, len: 0 }
+        WavlTree {
+            root: None,
+            first: None,
+            last: None,
+            len: 0,
+        }
     }
 
     /// Returns `true` if the tree contains no elements.
@@ -360,50 +367,58 @@ where
 
     /// Returns the minimum element of the tree.
     pub fn first(&self) -> Option<&T> {
-        self.first_raw().map(|first| unsafe { first.as_ref() })
-    }
-
-    fn first_raw(&self) -> Option<NonNull<T>> {
-        let mut cur = self.root?;
-
-        unsafe {
-            while let Some(left) = self.links(cur).left() {
-                cur = left;
-            }
-
-            Some(cur)
-        }
+        self.first.map(|first| unsafe { first.as_ref() })
     }
 
     /// Removes and returns the minimum element of the tree.
     pub fn pop_first(&mut self) -> Option<T::Handle> {
-        let first = self.first_raw()?;
+        let first = self.first?;
 
         unsafe { Some(self.remove_at(first)) }
     }
 
     /// Returns the maximum element of the tree.
     pub fn last(&self) -> Option<&T> {
-        self.last_raw().map(|last| unsafe { last.as_ref() })
-    }
-
-    fn last_raw(&self) -> Option<NonNull<T>> {
-        let mut cur = self.root?;
-
-        unsafe {
-            while let Some(right) = self.links(cur).right() {
-                cur = right;
-            }
-
-            Some(cur)
-        }
+        self.last.map(|last| unsafe { last.as_ref() })
     }
 
     /// Removes and returns the maximum element of the tree.
     pub fn pop_last(&mut self) -> Option<T::Handle> {
-        let last = self.last_raw()?;
+        let last = self.last?;
 
         unsafe { Some(self.remove_at(last)) }
+    }
+
+    // Shared logic for `predecessor()`/`successor()`.
+    unsafe fn cessor_raw(&self, node: NonNull<T>, dir: Dir) -> Option<NonNull<T>> {
+        if let Some(mut cur) = self.links(node).child(dir) {
+            while let Some(child) = self.links(cur).child(!dir) {
+                cur = child;
+            }
+
+            return Some(cur);
+        }
+
+        let mut cur = node;
+        while let Some(parent) = self.links(cur).parent() {
+            if self.which_child(parent, Some(cur)) == !dir {
+                return Some(parent);
+            }
+
+            cur = parent;
+        }
+
+        None
+    }
+
+    #[inline]
+    unsafe fn predecessor_raw(&self, node: NonNull<T>) -> Option<NonNull<T>> {
+        unsafe { self.cessor_raw(node, Dir::Left) }
+    }
+
+    #[inline]
+    unsafe fn successor_raw(&self, node: NonNull<T>) -> Option<NonNull<T>> {
+        unsafe { self.cessor_raw(node, Dir::Right) }
     }
 
     unsafe fn maybe_set_parent(&mut self, opt_node: Link<T>, parent: Link<T>) {
@@ -586,8 +601,15 @@ where
     pub fn insert(&mut self, item: T::Handle) -> Option<T::Handle> {
         match self.root {
             Some(root) => unsafe { self.insert_at(root, item) },
+
             None => {
-                unsafe { self.insert_as_root(T::into_ptr(item)) };
+                let ptr = T::into_ptr(item);
+
+                unsafe { self.insert_as_root(ptr) };
+
+                self.first = Some(ptr);
+                self.last = Some(ptr);
+
                 None
             }
         }
@@ -636,6 +658,15 @@ where
                     self.links_mut(ptr).set_right(right);
 
                     self.links_mut(cur).clear();
+
+                    if self.first == Some(cur) {
+                        self.first = Some(ptr);
+                    }
+
+                    if self.last == Some(cur) {
+                        self.last = Some(ptr);
+                    }
+
                     return Some(T::from_ptr(cur));
                 },
             };
@@ -672,6 +703,14 @@ where
                 // The parent node is rank 0 and the newly inserted node is also rank 0, which
                 // violates the rank rule.
                 self.rebalance_inserted(item);
+            }
+
+            if self.first == Some(parent) && dir == Dir::Left {
+                self.first = Some(item);
+            }
+
+            if self.last == Some(parent) && dir == Dir::Right {
+                self.last = Some(item);
             }
 
             self.len += 1;
@@ -733,6 +772,7 @@ where
             let rotate_dir = if self.links(parent).left() == Some(x) {
                 Dir::Right
             } else {
+                debug_assert_eq!(self.links(parent).right(), Some(x));
                 Dir::Left
             };
 
@@ -831,6 +871,9 @@ where
         //       3-child.
 
         let removed = node;
+
+        let new_first = (self.first == Some(removed)).then(|| self.successor_raw(removed));
+        let new_last = (self.last == Some(removed)).then(|| self.predecessor_raw(removed));
 
         unsafe {
             let parent = self.links(node).parent();
@@ -958,6 +1001,14 @@ where
                         }
                     }
                 }
+            }
+
+            if let Some(new_first) = new_first {
+                self.first = new_first;
+            }
+
+            if let Some(new_last) = new_last {
+                self.last = new_last;
             }
 
             self.len -= 1;

@@ -17,7 +17,7 @@ pub struct TestNode {
 }
 
 impl TestNode {
-    fn new(key: u32) -> Box<TestNode> {
+    pub(crate) fn new(key: u32) -> Box<TestNode> {
         Box::new(TestNode {
             links: Links::new(),
             key,

@@ -1,5 +1,6 @@
 extern crate std;
 
+use core::ptr;
 use std::{ops::Range, prelude::v1::*};
 
 use proptest::prelude::*;
@@ -164,6 +165,54 @@ fn remove_four() {
     insert_remove_all(&[3, 1, 2, 0]);
     insert_remove_all(&[3, 2, 0, 1]);
     insert_remove_all(&[3, 2, 1, 0]);
+}
+
+#[test]
+fn test_predecessor_successor() {
+    let mut wavl: WavlTree<TestNode> = WavlTree::new();
+
+    for i in 0..10 {
+        wavl.insert(TestNode::new(i));
+    }
+
+    for (i, elem) in wavl.iter().enumerate() {
+        let pred = if i > 0 {
+            wavl.iter().nth(i - 1).map(NonNull::from)
+        } else {
+            None
+        };
+
+        let succ = wavl.iter().nth(i + 1).map(NonNull::from);
+
+        assert_eq!(
+            pred,
+            unsafe { wavl.predecessor_raw(elem.into()) },
+            "key = {i}"
+        );
+        assert_eq!(
+            succ,
+            unsafe { wavl.successor_raw(elem.into()) },
+            "key = {i}"
+        );
+    }
+}
+
+#[test]
+fn test_first() {
+    let mut wavl: WavlTree<TestNode> = WavlTree::new();
+
+    // Ensure replacement updates first, last.
+    wavl.insert(TestNode::new(1));
+    let old = wavl.insert(TestNode::new(1)).unwrap();
+    assert_ne!(wavl.first().map(NonNull::from), Some(NonNull::from(&*old)));
+
+    wavl.clear();
+
+    wavl.insert(TestNode::new(3));
+    wavl.insert(TestNode::new(2));
+    wavl.insert(TestNode::new(1));
+
+    assert_eq!(wavl.first().unwrap().key, 1);
 }
 
 #[cfg(miri)]
