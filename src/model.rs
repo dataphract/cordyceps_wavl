@@ -1,7 +1,6 @@
 extern crate std;
 
-use core::ptr::NonNull;
-use std::{collections::BTreeSet, prelude::v1::*};
+use std::{collections::BTreeSet, prelude::v1::*, ptr::NonNull};
 
 use arbitrary::Arbitrary;
 use cordyceps::Linked;
@@ -234,5 +233,157 @@ pub fn run_btree_equivalence(ops: Vec<Op>) {
         wavl.assert_invariants();
         assert_eq!(btree.len(), wavl.len());
         assert!(btree.iter().zip(wavl.iter()).all(|(&a, b)| a == b.key));
+    }
+}
+
+#[derive(Clone, Debug, Arbitrary)]
+pub enum CursorOp {
+    // Get is not an operation as it's executed on every loop iteration to check equivalence.
+    MovePrev,
+    MoveNext,
+    PeekNext,
+    PeekPrev,
+    RemoveCurrent,
+    RemoveCurrentMovePrev,
+}
+
+pub fn cursor_op_strategy() -> impl Strategy<Value = CursorOp> {
+    proptest::prop_oneof![
+        Just(CursorOp::MovePrev),
+        Just(CursorOp::MoveNext),
+        Just(CursorOp::PeekNext),
+        Just(CursorOp::PeekPrev),
+        Just(CursorOp::RemoveCurrent),
+        Just(CursorOp::RemoveCurrentMovePrev),
+    ]
+}
+
+#[derive(Clone, Debug)]
+pub struct CursorEquivalenceInput {
+    pub values: Vec<u32>,
+    pub ops: Vec<CursorOp>,
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for CursorEquivalenceInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        fn value(u: &mut arbitrary::Unstructured<'_>) -> u32 {
+            u32::arbitrary(u).unwrap_or(0)
+        }
+
+        fn op(u: &mut arbitrary::Unstructured<'_>) -> CursorOp {
+            CursorOp::arbitrary(u).unwrap_or(CursorOp::MoveNext)
+        }
+
+        let num_values = u8::arbitrary(u)? % 100;
+        let num_ops = u16::arbitrary(u)? % 1000;
+
+        let values = core::iter::repeat_with(|| value(u))
+            .take(num_values.into())
+            .collect();
+
+        let ops = core::iter::repeat_with(|| op(u))
+            .take(num_ops.into())
+            .collect();
+
+        Ok(CursorEquivalenceInput { values, ops })
+    }
+}
+
+pub fn run_cursor_equivalence(mut values: Vec<u32>, ops: Vec<CursorOp>) {
+    values.sort_unstable();
+    values.dedup();
+
+    // Ideally this would be a BTreeMap cursor or even a LinkedList cursor, but neither is stable :(
+    let mut vec = Vec::new();
+    let mut wavl: WavlTree<TestNode> = WavlTree::new();
+
+    for val in values {
+        vec.push(val);
+        wavl.insert(TestNode::new(val));
+    }
+
+    fn vec_curs_prev(v: &Vec<u32>, curs: Option<usize>) -> Option<usize> {
+        match curs {
+            Some(i) => i.checked_sub(1),
+            None => v.len().checked_sub(1),
+        }
+    }
+
+    fn vec_curs_next(v: &Vec<u32>, curs: Option<usize>) -> Option<usize> {
+        match curs {
+            Some(i) => i.checked_add(1).filter(|&i| i < v.len()),
+            None => (!v.is_empty()).then_some(0),
+        }
+    }
+
+    let mut vec_curs = vec_curs_next(&vec, None);
+    let mut wavl_curs = wavl.cursor_first_mut();
+
+    // Check that the initial states are equivalent.
+    {
+        let v = vec_curs.map(|i| &vec[i]);
+        let w = wavl_curs.get().map(TestNode::key);
+
+        assert_eq!(v, w);
+    }
+
+    for op in ops {
+        match op {
+            CursorOp::MoveNext => {
+                vec_curs = vec_curs_next(&vec, vec_curs);
+                wavl_curs.move_next();
+            }
+
+            CursorOp::MovePrev => {
+                vec_curs = vec_curs_prev(&vec, vec_curs);
+                wavl_curs.move_prev();
+            }
+
+            CursorOp::PeekNext => {
+                let v = vec_curs_next(&vec, vec_curs).map(|i| &vec[i]);
+                let w = wavl_curs.peek_next().map(TestNode::key);
+
+                assert_eq!(v, w);
+            }
+
+            CursorOp::PeekPrev => {
+                let v = vec_curs_prev(&vec, vec_curs).map(|i| &vec[i]);
+                let w = wavl_curs.peek_prev().map(TestNode::key);
+
+                assert_eq!(v, w);
+            }
+
+            CursorOp::RemoveCurrent => {
+                let v = vec_curs.map(|i| vec.remove(i));
+
+                if vec_curs == Some(vec.len()) {
+                    vec_curs = None;
+                }
+
+                let w = wavl_curs.remove_current().map(|node| node.key);
+
+                assert_eq!(v, w);
+            }
+
+            CursorOp::RemoveCurrentMovePrev => {
+                let new_v_curs = vec_curs.is_some().then(|| vec_curs_prev(&vec, vec_curs));
+                let v = vec_curs.map(|i| vec.remove(i));
+
+                if let Some(vc) = new_v_curs {
+                    vec_curs = vc;
+                }
+
+                let w = wavl_curs
+                    .remove_current_and_move_prev()
+                    .map(|node| node.key);
+
+                assert_eq!(v, w);
+            }
+        }
+
+        let v = vec_curs.map(|i| &vec[i]);
+        let w = wavl_curs.get().map(TestNode::key);
+
+        assert_eq!(v, w);
     }
 }

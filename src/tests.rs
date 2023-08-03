@@ -1,6 +1,5 @@
 extern crate std;
 
-use core::ptr;
 use std::{ops::Range, prelude::v1::*};
 
 use proptest::prelude::*;
@@ -215,6 +214,28 @@ fn test_first() {
     assert_eq!(wavl.first().unwrap().key, 1);
 }
 
+#[test]
+fn test_cursor_wraps_around() {
+    let mut tree: WavlTree<TestNode> = WavlTree::new();
+    tree.insert(TestNode::new(0));
+    tree.insert(TestNode::new(1));
+
+    let mut curs = tree.cursor_first();
+    assert_eq!(curs.get().map(TestNode::key), Some(&0));
+
+    curs.move_prev();
+    assert_eq!(curs.get().map(TestNode::key), None);
+
+    curs.move_prev();
+    assert_eq!(curs.get().map(TestNode::key), Some(&1));
+
+    curs.move_next();
+    assert_eq!(curs.get().map(TestNode::key), None);
+
+    curs.move_next();
+    assert_eq!(curs.get().map(TestNode::key), Some(&0));
+}
+
 #[cfg(miri)]
 const FUZZ_RANGE: Range<usize> = 0..10;
 
@@ -230,5 +251,20 @@ proptest::proptest! {
     #[test]
     fn btree_equivalence(ops in proptest::collection::vec(model::op_strategy(), FUZZ_RANGE)) {
         model::run_btree_equivalence(ops);
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(ProptestConfig {
+        max_shrink_iters: 65536,
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn cursor_equivalence(
+        values in proptest::collection::vec(proptest::bits::u32::ANY, 100),
+        ops in proptest::collection::vec(model::cursor_op_strategy(), FUZZ_RANGE),
+    ) {
+        model::run_cursor_equivalence(values, ops)
     }
 }

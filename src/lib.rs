@@ -29,11 +29,15 @@ use core::{
 
 use cordyceps::Linked;
 
-pub use crate::iter::{Iter, IterMut};
+pub use crate::{
+    cursor::{Cursor, CursorMut},
+    iter::{Iter, IterMut},
+};
 
 #[cfg(feature = "alloc")]
 pub use crate::map::WavlMap;
 
+mod cursor;
 mod entry;
 mod iter;
 
@@ -387,6 +391,26 @@ where
         let last = self.last?;
 
         unsafe { Some(self.remove_at(last)) }
+    }
+
+    /// Returns a [`Cursor`] pointing to the first element of the tree.
+    pub fn cursor_first(&self) -> Cursor<'_, T> {
+        Cursor::first(self)
+    }
+
+    /// Returns a [`CursorMut`] pointing to the first element of the tree.
+    pub fn cursor_first_mut(&mut self) -> CursorMut<'_, T> {
+        CursorMut::first(self)
+    }
+
+    /// Returns a [`Cursor`] pointing to the last element of the tree.
+    pub fn cursor_last(&self) -> Cursor<'_, T> {
+        Cursor::last(self)
+    }
+
+    /// Returns a [`CursorMut`] pointing to the last element of the tree.
+    pub fn cursor_last_mut(&mut self) -> CursorMut<'_, T> {
+        CursorMut::last(self)
     }
 
     // Shared logic for `predecessor()`/`successor()`.
